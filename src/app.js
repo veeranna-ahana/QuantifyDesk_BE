@@ -14,6 +14,8 @@ const timesheetRoutes = require("./routes/timesheet.routes");
 const reconRoutes = require("./routes/recon.routes");
 const swaggerSpec = require("../helpers/swagerConfig/swagger");
 const hrmsApis = require("./routes/hrms.routes")
+const dailyReportsRoutes = require("./routes/dailyReports.routes");
+const timesheetHrmsRoutes = require("./routes/projectTimesheet.routes");
 
 
 const app = express();
@@ -54,7 +56,8 @@ app.use("/api/notifications", notificationRoutes); // ← NEW
 app.use("/api/timesheet", timesheetRoutes);
 app.use("/api/recon", reconRoutes);
 app.use("/api/hrms", hrmsApis)
-
+app.use("/api/daily-reports", dailyReportsRoutes);
+app.use("/api/hrms", timesheetHrmsRoutes);
 // Global error handler
 app.use((err, req, res, next) => {
   console.error(err);
