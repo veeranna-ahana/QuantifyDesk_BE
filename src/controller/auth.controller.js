@@ -313,7 +313,8 @@ const login = async (req, res) => {
       message: "Login successful",
       userid: loginResult.userid,
       // id: localUserId, // ❌ Removed - no users table dependency
-      accessToken,
+      accessToken,                   // ✅ Quantify JWT — for Quantify's own APIs
+      portalAccessToken: authToken,  // ✅ Main myahana portal token — for PMS API calls
       result: loginResult.result,
       source: loginResult.source,
       departments: departmentData,
