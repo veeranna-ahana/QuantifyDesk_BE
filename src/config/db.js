@@ -11,6 +11,7 @@ const quantifyPool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
+   dateStrings: true,
 });
 
 // Master DB connection pool (for employee data)
@@ -23,6 +24,7 @@ const masterPool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
+   dateStrings: true,
 });
 
 // Project Code DB connection pool (for customer names dropdown)
