@@ -15,10 +15,9 @@ const reconRoutes = require("./routes/recon.routes");
 const swaggerSpec = require("../helpers/swagerConfig/swagger");
 const hrmsApis = require("./routes/hrms.routes");
 const importProjectRoutes = require("./routes/importProject.routes"); // ← NEW
-const hrmsApis = require("./routes/hrms.routes")
 const dailyReportsRoutes = require("./routes/dailyReports.routes");
 const timesheetHrmsRoutes = require("./routes/projectTimesheet.routes");
-
+const quantifyDashboardRoutes = require("./routes/quantifyDashboard.routes");
 
 const app = express();
 // Dummy Test API
@@ -58,9 +57,10 @@ app.use("/api/notifications", notificationRoutes); // ← NEW
 app.use("/api/timesheet", timesheetRoutes);
 app.use("/api/recon", reconRoutes);
 app.use("/api/import-project", importProjectRoutes); // ← NEW
+app.use("/api/import-project/dashboard", quantifyDashboardRoutes); // ← NEW
 app.use("/api/hrms", hrmsApis);
 
-app.use("/api/hrms", hrmsApis)
+app.use("/api/hrms", hrmsApis);
 app.use("/api/daily-reports", dailyReportsRoutes);
 app.use("/api/hrms", timesheetHrmsRoutes);
 // Global error handler
