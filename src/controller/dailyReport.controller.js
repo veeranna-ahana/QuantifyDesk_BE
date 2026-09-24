@@ -1,10 +1,31 @@
-const { pmsGet, normalizePMSError, extractProjects, extractProjectDetails, toDate,shapeTask,isDelayed, } = require('../../helpers/pmsHelper');
-const { query, masterQuery } = require('../config/db');
+const {
+  pmsGet,
+  normalizePMSError,
+  extractProjects,
+  extractProjectDetails,
+  toDate,
+  shapeTask,
+  isDelayed,
+} = require("../../helpers/pmsHelper");
+const { getUatToken } = require("../../helpers/pmsTokenStore");
+const { query, masterQuery } = require("../config/db");
 
 //fetchStoredPmsProjects fetches all PMS projects stored in Quantify's project_info table, classifies them by status, and returns counts and lists.
 const fetchStoredPmsProjects = async (req, res) => {
   try {
-    const raw = await pmsGet(req, '/api/pms/getAllProjects');
+    // authMiddleware has already verified our own JWT and set req.user.
+    // PMS needs the original UAT token cached at login, not our JWT — never
+    // forward req.headers.authorization to PMS (see pmsHelper.js).
+    const uatToken = getUatToken(req.user?.emp_id);
+    if (!uatToken) {
+      return res.status(401).json({
+        success: false,
+        message:
+          "PMS session not found or expired. Please log in again to refresh your PMS access.",
+      });
+    }
+
+    const raw = await pmsGet(uatToken, "/api/pms/getAllProjects");
 
     const pmsArray = extractProjects(raw);
 
@@ -39,7 +60,7 @@ const fetchStoredPmsProjects = async (req, res) => {
     const storedIds = new Set(rows.map((r) => String(r.project_id).trim()));
 
     const stored = pmsArray.filter((p) => {
-      const id = String(p.project_id ?? p.id ?? '').trim();
+      const id = String(p.project_id ?? p.id ?? "").trim();
       return storedIds.has(id);
     });
 
@@ -55,30 +76,34 @@ const fetchStoredPmsProjects = async (req, res) => {
     let inactiveCount = 0;
 
     for (const p of stored) {
-      const status = String(p.status || '').toUpperCase().trim();
+      const status = String(p.status || "")
+        .toUpperCase()
+        .trim();
 
       switch (status) {
-        case 'COMPLETED':
+        case "COMPLETED":
           buckets.completed.push(p);
           break;
-        case 'APPROVED':
+        case "APPROVED":
           buckets.inprogress.push(p);
           break;
-        case 'WAITING_FOR_APPROVAL':
+        case "WAITING_FOR_APPROVAL":
           buckets.waiting_for_approval.push(p);
           break;
-        case 'REJECTED':
+        case "REJECTED":
           buckets.rejected.push(p);
           break;
-        case 'ON_HOLD':
+        case "ON_HOLD":
           buckets.on_hold.push(p);
           break;
-        case 'INACTIVE':
+        case "INACTIVE":
           inactiveCount++;
           break;
         default:
           // Unknown statuses are silently ignored (logged for visibility)
-          console.warn(`⚠️ Unknown project status: "${p.status}" for project_id ${p.project_id}`);
+          console.warn(
+            `⚠️ Unknown project status: "${p.status}" for project_id ${p.project_id}`,
+          );
       }
     }
 
@@ -109,14 +134,11 @@ const fetchStoredPmsProjects = async (req, res) => {
       ...buckets,
     });
   } catch (err) {
-    console.error('❌ fetchStoredPmsProjects error:', err.message);
+    console.error("❌ fetchStoredPmsProjects error:", err.message);
     const { status, body } = normalizePMSError(err);
     return res.status(status).json(body);
   }
 };
-
-
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/pms/project-tasks?projectId=639
@@ -132,7 +154,7 @@ async function getTaskInfoMapByPmsProjectId(pmsProjectId) {
        FROM task_info ti
        JOIN project_info pi ON pi.project_info_id = ti.project_info_id
       WHERE pi.project_id = ?`,
-    [String(pmsProjectId)]
+    [String(pmsProjectId)],
   );
 
   const map = new Map();
@@ -153,12 +175,26 @@ const fetchProjectTasks = async (req, res) => {
     if (!projectId) {
       return res.status(400).json({
         success: false,
-        message: 'projectId is required',
+        message: "projectId is required",
+      });
+    }
+
+    // authMiddleware has already verified our own JWT and set req.user.
+    // PMS needs the original UAT token cached at login, not our JWT — never
+    // forward req.headers.authorization to PMS (see pmsHelper.js).
+    const uatToken = getUatToken(req.user?.emp_id);
+    if (!uatToken) {
+      return res.status(401).json({
+        success: false,
+        message:
+          "PMS session not found or expired. Please log in again to refresh your PMS access.",
       });
     }
 
     // 1️⃣ Fetch PMS tasks + milestones
-    const raw = await pmsGet(req, '/api/pms/getProjectDetails', { projectId });
+    const raw = await pmsGet(uatToken, "/api/pms/getProjectDetails", {
+      projectId,
+    });
     const { tasks, milestones } = extractProjectDetails(raw);
 
     // 2️⃣ Fetch Quantify's task_info metadata (role, task_type, unit)
@@ -170,7 +206,13 @@ const fetchProjectTasks = async (req, res) => {
         project_id: projectId,
         total_tasks: 0,
         total_milestones: milestones.length,
-        counts: { YET_TO_START: 0, STARTED: 0, COMPLETED: 0, DELAYED: 0, ALL: 0 },
+        counts: {
+          YET_TO_START: 0,
+          STARTED: 0,
+          COMPLETED: 0,
+          DELAYED: 0,
+          ALL: 0,
+        },
         all: [],
         in_progress: [],
         all_completed: [],
@@ -190,9 +232,9 @@ const fetchProjectTasks = async (req, res) => {
       const meta = taskInfoMap.get(String(t.task_id));
       const shaped = shapeTask(t, meta);
 
-      if (t.status === 'STARTED') in_progress.push(shaped);
-      else if (t.status === 'COMPLETED') all_completed.push(shaped);
-      else if (t.status === 'YET_TO_START') not_yet_started.push(shaped);
+      if (t.status === "STARTED") in_progress.push(shaped);
+      else if (t.status === "COMPLETED") all_completed.push(shaped);
+      else if (t.status === "YET_TO_START") not_yet_started.push(shaped);
 
       if (isDelayed(t)) delayed.push(shaped);
     }
@@ -235,14 +277,13 @@ const fetchProjectTasks = async (req, res) => {
       last_completed_by_employee,
     });
   } catch (err) {
-    console.error('❌ fetchProjectTasks error:', err.message);
+    console.error("❌ fetchProjectTasks error:", err.message);
     const { status, body } = normalizePMSError(err);
     return res.status(status).json(body);
   }
 };
 
 module.exports = {
-    fetchStoredPmsProjects,
-    fetchProjectTasks,
-
-}
+  fetchStoredPmsProjects,
+  fetchProjectTasks,
+};
