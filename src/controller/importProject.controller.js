@@ -1,6 +1,6 @@
-const axios = require("axios");
 const { query, quantifyPool } = require("../config/db");
 const { getUatToken } = require("../../helpers/pmsTokenStore");
+const { pmsGet, extractProjects } = require("../../helpers/pmsHelper");
 
 // ============================================================================
 // Import Project — Step 1 (Project Info)
@@ -8,27 +8,15 @@ const { getUatToken } = require("../../helpers/pmsTokenStore");
 // New controller, kept separate from project.controller.js on purpose so the
 // existing /api/projects routes are left untouched. This is a plain
 // pass-through GET to the external PMS API — no DB involved.
+//
+// PMS calls go through helpers/pmsHelper.js's pmsGet, not a direct axios
+// call — that's the same shared helper dailyReport.controller.js uses, so
+// every PMS-calling controller in the app now goes through one place
+// instead of each reimplementing its own axios/PMS_CONFIG/headers. The
+// auth pattern itself is unchanged: still getUatToken(emp_id) from
+// pmsTokenStore.js, never the client's Authorization header — see
+// pmsHelper.js's own comments for why.
 // ============================================================================
-
-const PMS_CONFIG = {
-  baseUrl: process.env.PMS_BASE_URL || "http://172.16.20.61:5001",
-  timeout: process.env.PMS_TIMEOUT_MS
-    ? Number(process.env.PMS_TIMEOUT_MS)
-    : 10000,
-};
-
-// PMS only accepts the ORIGINAL UAT-issued token, not our own JWT (the one
-// authMiddleware just verified on this request). That UAT token was cached
-// server-side at login time (see auth.controller.js + pmsTokenStore.js),
-// keyed by emp_id — so we look it up here instead of forwarding whatever
-// arrived in the Authorization header.
-function getPMSHeaders(uatToken) {
-  return {
-    "Content-Type": "application/json",
-    Accept: "application/json",
-    Authorization: `Bearer ${uatToken}`,
-  };
-}
 
 // Normalizes whatever PMS sends in a task's `status` field into one of our
 // three buckets. PMS status strings can vary in casing/wording, so this is
@@ -168,17 +156,11 @@ const syncPmsProject = async (req, res, next) => {
       });
     }
 
-    const response = await axios.get(
-      `${PMS_CONFIG.baseUrl}/api/pms/getProjectDetails`,
-      {
-        params: { projectId },
-        headers: getPMSHeaders(uatToken),
-        timeout: PMS_CONFIG.timeout,
-      },
-    );
+    const data = await pmsGet(uatToken, "/api/pms/getProjectDetails", {
+      projectId,
+    });
 
-    const { projectDetails, milestoneDetails, tasksDetails } =
-      response.data || {};
+    const { projectDetails, milestoneDetails, tasksDetails } = data || {};
 
     if (!projectDetails) {
       return res.status(404).json({ message: "Project not found in PMS" });
@@ -459,21 +441,8 @@ const getImportedProjects = async (req, res, next) => {
 
     let pmsProjects = [];
     try {
-      const response = await axios.get(
-        `${PMS_CONFIG.baseUrl}/api/pms/getAllProjects`,
-        {
-          headers: getPMSHeaders(uatToken),
-          timeout: PMS_CONFIG.timeout,
-        },
-      );
-
-      if (Array.isArray(response.data)) {
-        pmsProjects = response.data;
-      } else if (response.data && Array.isArray(response.data.projects)) {
-        pmsProjects = response.data.projects;
-      } else if (response.data && Array.isArray(response.data.data)) {
-        pmsProjects = response.data.data;
-      }
+      const data = await pmsGet(uatToken, "/api/pms/getAllProjects");
+      pmsProjects = extractProjects(data);
     } catch (pmsErr) {
       console.error("Error fetching PMS projects for listing:", pmsErr.message);
       // Fall through with pmsProjects = [] — we still show local rows below,
@@ -571,18 +540,13 @@ const getProjectView = async (req, res, next) => {
 
     if (uatToken) {
       try {
-        const response = await axios.get(
-          `${PMS_CONFIG.baseUrl}/api/pms/getProjectDetails`,
-          {
-            params: { projectId: project.project_id },
-            headers: getPMSHeaders(uatToken),
-            timeout: PMS_CONFIG.timeout,
-          },
-        );
+        const data = await pmsGet(uatToken, "/api/pms/getProjectDetails", {
+          projectId: project.project_id,
+        });
 
-        projectDetails = response.data?.projectDetails || null;
-        milestoneDetails = response.data?.milestoneDetails || [];
-        tasksDetails = response.data?.tasksDetails || [];
+        projectDetails = data?.projectDetails || null;
+        milestoneDetails = data?.milestoneDetails || [];
+        tasksDetails = data?.tasksDetails || [];
       } catch (pmsErr) {
         console.error(
           "Error fetching PMS project details for view:",

@@ -1,32 +1,45 @@
-const axios = require('axios');
+const axios = require("axios");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PMS Helper
-// Centralizes all PMS API communication (base URL, auth header forwarding,
-// timeouts, error normalization). Use from any controller that proxies PMS.
+// Centralizes all PMS API communication (base URL, auth header, timeouts,
+// error normalization). Use from any controller that proxies PMS.
+//
+// AUTH — DO NOT forward req.headers.authorization to PMS.
+// That header carries OUR OWN JWT (authMiddleware already verified it and
+// set req.user), not the PMS/UAT token — PMS doesn't accept our JWT at all,
+// and it would also mean the frontend has to carry a second, PMS-scoped
+// token around, which is exactly the fragile/insecure pattern
+// pmsTokenStore.js was written to avoid (see that file's own comments).
+//
+// Every function here takes an already-resolved `uatToken` instead. Callers
+// get it the same way importProject.controller.js already does:
+//   const uatToken = getUatToken(req.user?.emp_id);
+//   if (!uatToken) return res.status(401).json({ message: '...' });
+// then pass that token in, e.g. pmsGet(uatToken, '/api/pms/getAllProjects').
 // ─────────────────────────────────────────────────────────────────────────────
 
 const DEFAULT_TIMEOUT = 30000;
 
 /**
- * Build headers for a PMS request.
- * Forwards the incoming Authorization header (main portal SSO token) verbatim.
+ * Build headers for a PMS request from an already-resolved UAT token (see
+ * helpers/pmsTokenStore.js — cached server-side at login, keyed by emp_id).
  *
- * @param {object} req - Express request object
+ * @param {string} uatToken - PMS/UAT token, looked up via getUatToken(empId)
  * @returns {object} headers
  */
-function getPMSHeaders(req) {
+function getPMSHeaders(uatToken) {
   const headers = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json',
+    "Content-Type": "application/json",
+    Accept: "application/json",
   };
 
-  const authHeader = req.headers?.authorization;
-
-  if (authHeader) {
-    headers['Authorization'] = authHeader;
+  if (uatToken) {
+    headers["Authorization"] = `Bearer ${uatToken}`;
   } else {
-    console.warn('⚠️ PMS Helper: No authorization header found in request');
+    console.warn(
+      "⚠️ PMS Helper: no UAT token provided — call will fail PMS auth",
+    );
   }
 
   return headers;
@@ -40,28 +53,28 @@ function getPMSHeaders(req) {
 function getPMSBaseUrl() {
   const baseUrl = process.env.PMS_BASE_URL;
   if (!baseUrl) {
-    throw new Error('PMS_BASE_URL is not configured in environment');
+    throw new Error("PMS_BASE_URL is not configured in environment");
   }
   return baseUrl;
 }
 
 /**
  * Generic PMS GET call. Builds URL from a path and optional query params,
- * forwards the incoming auth header, and returns response.data.
+ * and returns response.data.
  *
- * @param {object} req - Express request object (for headers)
+ * @param {string} uatToken - PMS/UAT token, looked up via getUatToken(empId)
  * @param {string} path - PMS path starting with '/', e.g. '/api/pms/foo'
  * @param {object} [query] - Optional query params
  * @param {object} [options] - { timeout }
  * @returns {Promise<any>} PMS response data
  */
-async function pmsGet(req, path, query = {}, options = {}) {
+async function pmsGet(uatToken, path, query = {}, options = {}) {
   const baseUrl = getPMSBaseUrl();
   const url = `${baseUrl}${path}`;
-  const headers = getPMSHeaders(req);
+  const headers = getPMSHeaders(uatToken);
   const timeout = options.timeout ?? DEFAULT_TIMEOUT;
 
-  console.log('📡 PMS GET:', url);
+  console.log("📡 PMS GET:", url);
 
   const response = await axios.get(url, {
     headers,
@@ -75,19 +88,19 @@ async function pmsGet(req, path, query = {}, options = {}) {
 /**
  * Generic PMS POST call.
  *
- * @param {object} req - Express request object
+ * @param {string} uatToken - PMS/UAT token, looked up via getUatToken(empId)
  * @param {string} path - PMS path starting with '/'
  * @param {object} [body] - Request body
  * @param {object} [options] - { timeout }
  * @returns {Promise<any>} PMS response data
  */
-async function pmsPost(req, path, body = {}, options = {}) {
+async function pmsPost(uatToken, path, body = {}, options = {}) {
   const baseUrl = getPMSBaseUrl();
   const url = `${baseUrl}${path}`;
-  const headers = getPMSHeaders(req);
+  const headers = getPMSHeaders(uatToken);
   const timeout = options.timeout ?? DEFAULT_TIMEOUT;
 
-  console.log('📡 PMS POST:', url);
+  console.log("📡 PMS POST:", url);
 
   const response = await axios.post(url, body, {
     headers,
@@ -114,8 +127,8 @@ function normalizePMSError(err) {
         status: 401,
         body: {
           success: false,
-          message: 'Authentication failed with PMS API',
-          error: pmsData.message || 'Invalid or expired token',
+          message: "Authentication failed with PMS API",
+          error: pmsData.message || "Invalid or expired token",
         },
       };
     }
@@ -125,8 +138,8 @@ function normalizePMSError(err) {
         status: 403,
         body: {
           success: false,
-          message: 'Access denied by PMS API',
-          error: pmsData.message || 'Forbidden',
+          message: "Access denied by PMS API",
+          error: pmsData.message || "Forbidden",
         },
       };
     }
@@ -136,8 +149,8 @@ function normalizePMSError(err) {
         status: 404,
         body: {
           success: false,
-          message: 'Resource not found in PMS',
-          error: pmsData.message || 'Not found',
+          message: "Resource not found in PMS",
+          error: pmsData.message || "Not found",
         },
       };
     }
@@ -146,30 +159,30 @@ function normalizePMSError(err) {
       status,
       body: {
         success: false,
-        message: 'PMS API error',
-        error: pmsData.message || pmsData || 'Unknown PMS error',
+        message: "PMS API error",
+        error: pmsData.message || pmsData || "Unknown PMS error",
       },
     };
   }
 
   // Timeout / network error
-  if (err.code === 'ECONNABORTED') {
+  if (err.code === "ECONNABORTED") {
     return {
       status: 504,
       body: {
         success: false,
-        message: 'PMS request timed out',
+        message: "PMS request timed out",
         error: err.message,
       },
     };
   }
 
-  if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED') {
+  if (err.code === "ENOTFOUND" || err.code === "ECONNREFUSED") {
     return {
       status: 503,
       body: {
         success: false,
-        message: 'PMS is unreachable',
+        message: "PMS is unreachable",
         error: err.message,
       },
     };
@@ -180,7 +193,7 @@ function normalizePMSError(err) {
     status: 500,
     body: {
       success: false,
-      message: 'Failed to communicate with PMS',
+      message: "Failed to communicate with PMS",
       error: err.message,
     },
   };
@@ -271,7 +284,7 @@ module.exports = {
   pmsGet,
   pmsPost,
   normalizePMSError,
-extractProjects,
+  extractProjects,
   extractProjectDetails,
   toDate,
   shapeTask,
