@@ -24,15 +24,16 @@ const syncHrmsTimesheets = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const getHrmsTimesheets = async (req, res) => {
   try {
-    const { project_code, employee_id, from_date, to_date } = req.query;
+    const { project_code, projectcategory_code, employee_id, from_date, to_date } = req.query;
 
     const conditions = [];
     const params = [];
 
-    if (project_code) { conditions.push('project_code = ?'); params.push(project_code); }
-    if (employee_id)  { conditions.push('employee_id = ?');  params.push(employee_id); }
-    if (from_date)    { conditions.push('from_date >= ?');   params.push(from_date); }
-    if (to_date)      { conditions.push('to_date <= ?');     params.push(to_date); }
+    if (project_code)         { conditions.push('project_code = ?');         params.push(project_code); }
+    if (projectcategory_code) { conditions.push('projectcategory_code = ?'); params.push(projectcategory_code); }
+    if (employee_id)          { conditions.push('employee_id = ?');          params.push(employee_id); }
+    if (from_date)            { conditions.push('from_date >= ?');           params.push(from_date); }
+    if (to_date)              { conditions.push('to_date <= ?');             params.push(to_date); }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
@@ -81,14 +82,38 @@ const getCategoryTimesheetsGroupedByEmployee = async (req, res) => {
         success: true,
         projectcategory_code,
         count: 0,
+          total_hours: 0,
+          approved_hours: 0,
+          pending_hours: 0,
+          rejected_hours: 0,
+          total_entries: 0,
+          total_employees: 0,
         data: [],
       });
     }
 
-    // Aggregate per employee
+    // ─── Aggregation accumulators ──────────────────────────────────────────
     const map = new Map();
 
+    let grandTotalHours = 0;
+    let grandApprovedHours = 0;
+    let grandPendingHours = 0;
+    let grandRejectedHours = 0;
+    let grandTotalEntries = 0;
+
     for (const r of rows) {
+      const hours = Number(r.number_of_hours) || 0;
+      const status = (r.approval_status || '').trim();
+
+      // Grand totals across all rows
+      grandTotalHours += hours;
+      grandTotalEntries += 1;
+
+      if (status === 'Approved') grandApprovedHours += hours;
+      else if (status === 'Pending') grandPendingHours += hours;
+      else if (status === 'Rejected') grandRejectedHours += hours;
+
+      // ─── Per-employee aggregation (unchanged logic) ───
       const key = r.employee_id;
 
       if (!map.has(key)) {
@@ -107,42 +132,45 @@ const getCategoryTimesheetsGroupedByEmployee = async (req, res) => {
           projectcategory_code: r.projectcategory_code,
           projectcategory_name: r.projectcategory_name,
 
-          // Aggregates
-          from_date: r.from_date,      // earliest — updated below
-          to_date: r.to_date,          // latest — updated below
-          total_hours: Number(r.number_of_hours) || 0,
+          from_date: r.from_date,
+          to_date: r.to_date,
+          total_hours: hours,
+          approved_hours: status === 'Approved' ? hours : 0,
+          pending_hours: status === 'Pending' ? hours : 0,
+          rejected_hours: status === 'Rejected' ? hours : 0,
           entries: 1,
 
-          // Status summary
-          statuses: [r.approval_status],
-          approved: r.approval_status === 'Approved' ? 1 : 0,
-          pending: r.approval_status === 'Pending' ? 1 : 0,
-          rejected: r.approval_status === 'Rejected' ? 1 : 0,
-
-          // Last approval info (most recent)
+          approved: status === 'Approved' ? 1 : 0,
+          pending: status === 'Pending' ? 1 : 0,
+          rejected: status === 'Rejected' ? 1 : 0,
+          last_submitted_on: r.submitted_on || null,
           last_approved_by: r.approved_by || null,
           last_approved_on: r.approved_on || null,
         });
       } else {
         const a = map.get(key);
 
-        // earlier from_date wins
         if (r.from_date < a.from_date) a.from_date = r.from_date;
-
-        // later to_date wins
         if (r.to_date > a.to_date) a.to_date = r.to_date;
 
-        // sum hours
-        a.total_hours += Number(r.number_of_hours) || 0;
+        a.total_hours += hours;
         a.entries += 1;
 
-        // status counters
-        if (r.approval_status === 'Approved') a.approved += 1;
-        else if (r.approval_status === 'Pending') a.pending += 1;
-        else if (r.approval_status === 'Rejected') a.rejected += 1;
-        a.statuses.push(r.approval_status);
+        if (status === 'Approved') {
+          a.approved += 1;
+          a.approved_hours += hours;
+        } else if (status === 'Pending') {
+          a.pending += 1;
+          a.pending_hours += hours;
+        } else if (status === 'Rejected') {
+          a.rejected += 1;
+          a.rejected_hours += hours;
+        }
+        // keep the most recent submitted_on
+if (r.submitted_on && (!a.last_submitted_on || r.submitted_on > a.last_submitted_on)) {
+  a.last_submitted_on = r.submitted_on;
+}
 
-        // keep the most recent approval info
         if (r.approved_on && (!a.last_approved_on || r.approved_on > a.last_approved_on)) {
           a.last_approved_on = r.approved_on;
           a.last_approved_by = r.approved_by || null;
@@ -150,29 +178,42 @@ const getCategoryTimesheetsGroupedByEmployee = async (req, res) => {
       }
     }
 
-    // finalize
+    // ─── Finalize per-employee rows ────────────────────────────────────────
+    const round2 = (n) => Math.round(n * 100) / 100;
+
     const data = [...map.values()].map((a) => {
-      // overall status: Approved if all approved, Pending if any pending, etc.
       const overall =
         a.pending > 0 ? 'Pending'
         : a.rejected > 0 ? 'Rejected'
         : a.approved === a.entries ? 'Approved'
         : 'Mixed';
 
-      // round total to 2 decimals (avoid float drift)
-      a.total_hours = Math.round(a.total_hours * 100) / 100;
-
       return {
         ...a,
+        total_hours: round2(a.total_hours),
+        approved_hours: round2(a.approved_hours),
+        pending_hours: round2(a.pending_hours),
+        rejected_hours: round2(a.rejected_hours),
         overall_status: overall,
-        statuses: undefined, // drop the raw array
       };
     });
 
+    // ─── Response ──────────────────────────────────────────────────────────
     return res.status(200).json({
       success: true,
       projectcategory_code,
       count: data.length,
+
+      // ✅ NEW: category-level totals
+      
+        total_hours: round2(grandTotalHours),
+        approved_hours: round2(grandApprovedHours),
+        pending_hours: round2(grandPendingHours),
+        rejected_hours: round2(grandRejectedHours),
+        total_entries: grandTotalEntries,
+        total_employees: data.length,
+    
+
       data,
     });
   } catch (err) {
