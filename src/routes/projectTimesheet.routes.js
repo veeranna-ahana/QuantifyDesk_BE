@@ -83,6 +83,11 @@ module.exports = router;
  *           type: string
  *         description: Filter by employee ID
  *       - in: query
+ *         name: projectcategory_code
+ *         schema:
+ *           type: string
+ *         description: Filter by project category code
+ *       - in: query
  *         name: from_date
  *         schema:
  *           type: string
@@ -151,6 +156,28 @@ module.exports = router;
  *                   type: string
  *                   example: NBD3011
  *                 count:
+ *                   type: integer
+ *                   example: 1
+ *                 total_hours:
+ *                   type: number
+ *                   format: double
+ *                   example: 40
+ *                 approved_hours:
+ *                   type: number
+ *                   format: double
+ *                   example: 24
+ *                 pending_hours:
+ *                   type: number
+ *                   format: double
+ *                   example: 16
+ *                 rejected_hours:
+ *                   type: number
+ *                   format: double
+ *                   example: 0
+ *                 total_entries:
+ *                   type: integer
+ *                   example: 5
+ *                 total_employees:
  *                   type: integer
  *                   example: 1
  *                 data:
@@ -253,6 +280,15 @@ module.exports = router;
  *         total_hours:
  *           type: number
  *           format: double
+ *         approved_hours:
+ *           type: number
+ *           format: double
+ *         pending_hours:
+ *           type: number
+ *           format: double
+ *         rejected_hours:
+ *           type: number
+ *           format: double
  *         entries:
  *           type: integer
  *         approved:
@@ -261,6 +297,9 @@ module.exports = router;
  *           type: integer
  *         rejected:
  *           type: integer
+ *         last_submitted_on:
+ *           type: string
+ *           nullable: true
  *         last_approved_by:
  *           type: string
  *           nullable: true
