@@ -4,6 +4,8 @@ const router = express.Router();
 const { authMiddleware } = require("../middleware/auth.middleware");
 const {
   getDashboardOverview,
+  getEmployeeUtilization,
+  getAllEmployeesUtilization,
 } = require("../controller/quantifyDashboard.controller");
 
 // ── Dashboard ────────────────────────────────────────────────────────────
@@ -11,6 +13,9 @@ const {
 // Overview, Project Status Distribution and Project Delivery Performance
 // table, in one call, scoped to imported projects only.
 router.get("/overview", authMiddleware, getDashboardOverview);
+router.get('/employee/:emp_id', getEmployeeUtilization);
+router.get('/all-employees', getAllEmployeesUtilization);
+
 
 module.exports = router;
 
@@ -120,6 +125,180 @@ module.exports = router;
  *       401:
  *         $ref: '#/components/responses/UnauthorizedError'
  *
+ *       500:
+ *         $ref: '#/components/responses/InternalServerError'
+ */
+
+/**
+ * @swagger
+ * /import-project/dashboard/employee/{emp_id}:
+ *   get:
+ *     summary: Get employee utilization
+ *     description: |
+ *       Returns an employee's assigned projects, effort totals, HRMS logged
+ *       hours, and PMS task details. The PMS bearer token should pass in
+ *       the Authorization header; If the employee has no assigned projects,
+ *       the endpoint returns an empty project list without calling PMS.
+ *     tags: [Employee Utilization]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: emp_id
+ *         required: true
+ *         description: Employee identifier.
+ *         schema:
+ *           type: string
+ *         example: AS01989
+ *
+ *     responses:
+ *       200:
+ *         description: Employee utilization retrieved successfully.
+ *         content:
+ *           application/json:
+ *             examples:
+ *               withProjects:
+ *                 summary: Employee with assigned projects
+ *                 value:
+ *                   success: true
+ *                   emp_id: AS01989
+ *                   total_projects: 1
+ *                   totals:
+ *                     total_assigned_days: 12.5
+ *                     total_assigned_hours: 100
+ *                     total_logged_hours: 36
+ *                   projects:
+ *                     - project_info_id: 7
+ *                       pms_project_id: "2"
+ *                       project_code: KBL-042
+ *                       project_category_code: KBL
+ *                       description: Core Banking Upgrade
+ *                       assigned_task_count: 3
+ *                       assigned_units: 8
+ *                       completed_tasks: 1
+ *                       in_progress_tasks: 1
+ *                       pending_tasks: 1
+ *                       inactive_tasks: 0
+ *                       total_tasks_in_project: 3
+ *                       task_planned_start_date: "2026-09-01"
+ *                       task_planned_end_date: "2026-10-15"
+ *                       task_span_days: 45
+ *                       task_actual_start_date: "2026-09-03"
+ *                       task_actual_end_date: null
+ *                       task_status_summary:
+ *                         COMPLETED: 1
+ *                         STARTED: 1
+ *                         YET_TO_START: 1
+ *                         INACTIVE: 0
+ *                         other: 0
+ *                       tasks:
+ *                         - task_id: 101
+ *                           task_title: API integration
+ *                           status: STARTED
+ *                           planned_start_date: "2026-09-01"
+ *                           planned_end_date: "2026-09-15"
+ *                           actual_start_date: "2026-09-03"
+ *                           actual_end_date: null
+ *                           no_days_required: 5
+ *                           emp_id: AS01989
+ *                           emp_name: Alex Smith
+ *                       assigned_days: 12.5
+ *                       assigned_hours: 100
+ *                       logged_hours: 36
+ *               noProjects:
+ *                 summary: Employee without assigned projects
+ *                 value:
+ *                   success: true
+ *                   emp_id: AS01989
+ *                   total_projects: 0
+ *                   total_assigned_days: 0
+ *                   total_logged_hours: 0
+ *                   projects: []
+ *       400:
+ *         description: Employee ID is required.
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: false
+ *               message: emp_id is required
+ *       401:
+ *         description: No PMS token is available for an employee with projects.
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: false
+ *               message: PMS token missing. Send Authorization header or configure PMS_SERVICE_TOKEN.
+ *       500:
+ *         $ref: '#/components/responses/InternalServerError'
+ */
+
+/**
+ * @swagger
+ * /import-project/dashboard/all-employees:
+ *   get:
+ *     summary: Get utilization for all assigned employees
+ *     description: |
+ *       Returns employees with assignments in `task_info` or `effort_estimate`,
+ *       their assigned projects, and employee-level effort and logged-hours
+ *       totals. Set `include_pms=true` to add task date and status summaries
+ *       from PMS. PMS failures for individual
+ *       projects leave that project's enrichment fields null.
+ *     tags: [Employee Utilization]
+ *     parameters:
+ *       - in: query
+ *         name: emp_id
+ *         required: false
+ *         description: Limit results to one employee.
+ *         schema:
+ *           type: string
+ *         example: AS01989
+ *     
+ *     responses:
+ *       200:
+ *         description: Employee utilization retrieved successfully.
+ *         content:
+ *           application/json:
+ *             examples:
+ *               withEmployees:
+ *                 summary: Employees with assignments
+ *                 value:
+ *                   success: true
+ *                   total_employees: 1
+ *                   employees:
+ *                     - emp_id: AS01989
+ *                       emp_name: Alex Smith
+ *                       total_projects: 1
+ *                       total_assigned_days: 12.5
+ *                       total_assigned_hours: 100
+ *                       total_logged_hours: 36
+ *                       projects:
+ *                         - project_info_id: 7
+ *                           pms_project_id: "2"
+ *                           project_code: KBL-042
+ *                           project_category_code: KBL
+ *                           description: Core Banking Upgrade
+ *                           task_planned_start_date: "2026-09-01"
+ *                           task_planned_end_date: "2026-10-15"
+ *                           task_actual_start_date: "2026-09-03"
+ *                           task_actual_end_date: null
+ *                           task_status_summary:
+ *                             COMPLETED: 1
+ *                             STARTED: 1
+ *                             YET_TO_START: 1
+ *                             INACTIVE: 0
+ *               noEmployees:
+ *                 summary: No employees with assignments
+ *                 value:
+ *                   success: true
+ *                   total_employees: 0
+ *                   employees: []
+ *       401:
+ *         description: PMS session is missing when `include_pms=true`.
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: false
+ *               message: No PMS session found for this user. Please log in again.
  *       500:
  *         $ref: '#/components/responses/InternalServerError'
  */

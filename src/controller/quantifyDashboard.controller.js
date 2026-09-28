@@ -1,6 +1,6 @@
 const { query } = require("../config/db");
 const { getUatToken } = require("../../helpers/pmsTokenStore");
-const { pmsGet, extractProjects } = require("../../helpers/pmsHelper");
+const { pmsGet, extractProjects, normalizePMSError, extractProjectDetails } = require("../../helpers/pmsHelper");
 
 // ============================================================================
 // Quantify Dashboard
@@ -310,6 +310,523 @@ const getDashboardOverview = async (req, res, next) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/utilization/all-employees
+// Lists every employee with assigned projects + per-project + totals.
+//
+// Query params:
+//   ?include_pms=true    fetch PMS task details per project (slower)
+//   ?emp_id=AS01989      filter to one employee (optional)
+// ─────────────────────────────────────────────────────────────────────────────
+const getAllEmployeesUtilization = async (req, res) => {
+  try {
+    const HOURS_PER_DAY = 8;
+    const includePms = String(req.query.include_pms).toLowerCase() === "true";
+    const filterEmpId = req.query.emp_id || null;
+
+    // ─── 1. Find all employees with any assignment ──────────────────────────
+    const assignmentParams = [];
+    let assignmentWhere = "";
+
+    if (filterEmpId) {
+      assignmentWhere = "AND ti.emp_id = ?";
+      assignmentParams.push(filterEmpId);
+    }
+
+    const employees = await query(
+      `SELECT
+     a.emp_id,
+     e.emp_name
+   FROM (
+     SELECT DISTINCT emp_id FROM task_info WHERE emp_id IS NOT NULL
+     UNION
+     SELECT emp_id FROM effort_estimate WHERE emp_id IS NOT NULL
+   ) AS a
+   LEFT JOIN master.emp e ON e.emp_id = a.emp_id
+   ${filterEmpId ? "WHERE a.emp_id = ?" : ""}
+   ORDER BY a.emp_id`,
+      filterEmpId ? [filterEmpId] : [],
+    );
+
+    if (employees.length === 0) {
+      return res.status(200).json({
+        success: true,
+        total_employees: 0,
+        employees: [],
+      });
+    }
+
+    const empIds = employees.map((e) => e.emp_id);
+
+    // ─── 2. Fetch per-project data for all these employees in one query ────
+    const placeholders = empIds.map(() => "?").join(",");
+
+    const rows = await query(
+      `SELECT
+         ti.emp_id                                        AS emp_id,
+         pi.project_info_id                               AS project_info_id,
+         pi.project_id                                    AS pms_project_id,
+         pi.project_code                                  AS project_code,
+         pi.sub_category                                  AS project_category_code,
+         pi.description                                   AS description,
+
+         COALESCE(ta.assigned_task_count, 0)              AS assigned_task_count,
+         COALESCE(ta.assigned_units,      0)              AS assigned_units,
+         COALESCE(ef.assigned_days,       0)              AS assigned_days,
+         COALESCE(hr.logged_hours,        0)              AS logged_hours
+
+       FROM (
+         SELECT emp_id, project_info_id FROM task_info
+         UNION
+         SELECT emp_id, project_info_id FROM effort_estimate
+       ) ti
+
+       JOIN project_info pi
+         ON pi.project_info_id = ti.project_info_id
+
+       LEFT JOIN (
+         SELECT emp_id, project_info_id,
+                COUNT(DISTINCT task_id) AS assigned_task_count,
+                SUM(unit)               AS assigned_units
+           FROM task_info
+          GROUP BY emp_id, project_info_id
+       ) ta
+         ON ta.emp_id = ti.emp_id AND ta.project_info_id = ti.project_info_id
+
+       LEFT JOIN (
+         SELECT emp_id, project_info_id,
+                SUM(effort_days + buffer_days) AS assigned_days
+           FROM effort_estimate
+          GROUP BY emp_id, project_info_id
+       ) ef
+         ON ef.emp_id = ti.emp_id AND ef.project_info_id = ti.project_info_id
+
+       LEFT JOIN (
+         SELECT employee_id, projectcategory_code,
+                SUM(number_of_hours) AS logged_hours
+           FROM hrms_timesheet
+          GROUP BY employee_id, projectcategory_code
+       ) hr
+         ON hr.employee_id = ti.emp_id
+        AND hr.projectcategory_code = pi.sub_category
+
+       WHERE ti.emp_id IN (${placeholders})
+       ORDER BY ti.emp_id, pi.project_info_id`,
+      empIds,
+    );
+
+    // ─── 3. Group rows by employee ─────────────────────────────────────────
+    const nameMap = new Map(employees.map((e) => [e.emp_id, e.emp_name]));
+    const byEmployee = new Map();
+
+    for (const r of rows) {
+      if (!byEmployee.has(r.emp_id)) {
+        byEmployee.set(r.emp_id, {
+          emp_id: r.emp_id,
+          emp_name: nameMap.get(r.emp_id) || null,
+          total_projects: 0,
+          total_assigned_days: 0,
+          total_assigned_hours: 0,
+          total_logged_hours: 0,
+          projects: [],
+        });
+      }
+
+      const emp = byEmployee.get(r.emp_id);
+      const assignedDays = Number(r.assigned_days) || 0;
+      const assignedHours = assignedDays * HOURS_PER_DAY;
+      const loggedHours = Number(r.logged_hours) || 0;
+
+      emp.projects.push({
+        project_info_id: r.project_info_id,
+        pms_project_id: r.pms_project_id,
+        project_code: r.project_code,
+        project_category_code: r.project_category_code,
+        description: r.description,
+        // assigned_task_count: Number(r.assigned_task_count) || 0,
+        // assigned_units: Number(r.assigned_units) || 0,
+        // assigned_days: assignedDays,
+        // assigned_hours: assignedHours,
+        // logged_hours: loggedHours,
+      });
+
+      emp.total_projects += 1;
+      emp.total_assigned_days += assignedDays;
+      emp.total_assigned_hours += assignedHours;
+      emp.total_logged_hours += loggedHours;
+    }
+
+    // ─── 4. Optional PMS enrichment (task dates per project) ───────────────
+    if (includePms) {
+      const { getUatToken } = require("../helpers/pmsTokenStore");
+      const uatToken = getUatToken(req.user?.emp_id);
+
+      if (!uatToken) {
+        return res.status(401).json({
+          success: false,
+          message: "No PMS session found for this user. Please log in again.",
+        });
+      }
+
+      for (const emp of byEmployee.values()) {
+        for (const proj of emp.projects) {
+          try {
+            const raw = await pmsGet(uatToken, "/api/pms/getProjectDetails", {
+              projectId: proj.pms_project_id,
+            });
+            const { tasks } = extractProjectDetails(raw);
+            const myTasks = tasks.filter(
+              (t) => String(t.emp_id).trim() === String(emp.emp_id).trim(),
+            );
+
+            const plannedStarts = myTasks
+              .map((t) => t.planned_start_date)
+              .filter(Boolean)
+              .sort();
+            const plannedEnds = myTasks
+              .map((t) => t.planned_end_date)
+              .filter(Boolean)
+              .sort();
+            const actualStarts = myTasks
+              .map((t) => t.actual_start_date)
+              .filter(Boolean)
+              .sort();
+            const actualEnds = myTasks
+              .map((t) => t.actual_end_date)
+              .filter(Boolean)
+              .sort();
+
+            proj.task_planned_start_date = plannedStarts[0] || null;
+            proj.task_planned_end_date =
+              plannedEnds[plannedEnds.length - 1] || null;
+            proj.task_actual_start_date = actualStarts[0] || null;
+            proj.task_actual_end_date =
+              actualEnds[actualEnds.length - 1] || null;
+            proj.task_status_summary = {
+              COMPLETED: myTasks.filter((t) => t.status === "COMPLETED").length,
+              STARTED: myTasks.filter((t) => t.status === "STARTED").length,
+              YET_TO_START: myTasks.filter((t) => t.status === "YET_TO_START")
+                .length,
+              INACTIVE: myTasks.filter((t) => t.status === "INACTIVE").length,
+            };
+          } catch (err) {
+            console.warn(
+              `⚠️ PMS fetch failed for project ${proj.pms_project_id}:`,
+              err.message,
+            );
+            proj.task_planned_start_date = null;
+            proj.task_planned_end_date = null;
+            proj.task_actual_start_date = null;
+            proj.task_actual_end_date = null;
+            proj.task_status_summary = null;
+          }
+        }
+      }
+    }
+
+    // ─── 5. Response ───────────────────────────────────────────────────────
+    const employees_out = [...byEmployee.values()].map((e) => ({
+      ...e,
+      total_assigned_days: Math.round(e.total_assigned_days * 100) / 100,
+      total_assigned_hours: Math.round(e.total_assigned_hours * 100) / 100,
+      total_logged_hours: Math.round(e.total_logged_hours * 100) / 100,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      total_employees: employees_out.length,
+      employees: employees_out,
+    });
+  } catch (err) {
+    console.error("❌ getAllEmployeesUtilization error:", err.message);
+    const { status, body } = normalizePMSError(err);
+    return res.status(status).json(body);
+  }
+};
+
+const HOURS_PER_DAY = 8; // adjust if your org uses a different value
+
+const getEmployeeUtilization = async (req, res) => {
+  try {
+    const empId = req.query.emp_id || req.params.emp_id;
+
+    if (!empId) {
+      return res.status(400).json({
+        success: false,
+        message: "emp_id is required",
+      });
+    }
+
+    // ✅ Extract the caller's token (or fall back to a service token)
+    const uatToken =
+      (req.headers.authorization || "").replace(/^Bearer\s+/i, "") ||
+      process.env.PMS_SERVICE_TOKEN ||
+      null;
+
+    if (!uatToken) {
+      return res.status(401).json({
+        success: false,
+        message:
+          "PMS token missing. Send Authorization header or configure PMS_SERVICE_TOKEN.",
+      });
+    }
+
+    // ─── 1. Fetch projects + aggregated local data ─────────────────────────
+    const rows = await query(
+      `SELECT
+         pi.project_info_id,
+         pi.project_id            AS pms_project_id,
+         pi.project_code,
+         pi.sub_category,
+         pi.description,
+         COALESCE(t.assigned_task_count, 0) AS assigned_task_count,
+         COALESCE(t.assigned_units,      0) AS assigned_units,
+         COALESCE(e.assigned_days,       0) AS assigned_days,
+         COALESCE(h.logged_hours,        0) AS logged_hours
+       FROM project_info pi
+       LEFT JOIN (
+         SELECT project_info_id,
+                COUNT(DISTINCT task_id) AS assigned_task_count,
+                SUM(unit)               AS assigned_units
+           FROM task_info
+          WHERE emp_id = ?
+          GROUP BY project_info_id
+       ) t ON t.project_info_id = pi.project_info_id
+       LEFT JOIN (
+         SELECT project_info_id,
+                SUM(effort_days + buffer_days) AS assigned_days
+           FROM effort_estimate
+          WHERE emp_id = ?
+          GROUP BY project_info_id
+       ) e ON e.project_info_id = pi.project_info_id
+       LEFT JOIN (
+  SELECT projectcategory_code,
+         SUM(number_of_hours) AS logged_hours
+    FROM hrms_timesheet
+   WHERE employee_id = ?
+   GROUP BY projectcategory_code
+) h ON h.projectcategory_code = pi.sub_category
+       WHERE t.project_info_id IS NOT NULL
+          OR e.project_info_id IS NOT NULL
+       ORDER BY pi.project_info_id`,
+      [empId, empId, empId],
+    );
+
+    if (rows.length === 0) {
+      return res.status(200).json({
+        success: true,
+        emp_id: empId,
+        total_projects: 0,
+        total_assigned_days: 0,
+        total_logged_hours: 0,
+        projects: [],
+      });
+    }
+
+    // ─── 2. Fetch PMS task details for each project ────────────────────────
+    const enriched = await Promise.all(
+      rows.map(async (p) => {
+        let tasks = [];
+        let milestones = [];
+
+        try {
+          console.log(
+            `\n🔍 Fetching PMS details for project ${p.pms_project_id} (emp=${empId})`,
+          );
+
+          const raw = await pmsGet(uatToken, "/api/pms/getProjectDetails", {
+            projectId: p.pms_project_id,
+          });
+
+          console.log("   RAW keys:", Object.keys(raw || {}));
+          console.log(
+            "   raw.tasksDetails is array?",
+            Array.isArray(raw?.tasksDetails),
+          );
+          console.log("   raw.tasksDetails length:", raw?.tasksDetails?.length);
+
+          const parsed = extractProjectDetails(raw);
+          tasks = parsed.tasks;
+          milestones = parsed.milestones;
+
+          console.log("   parsed.tasks length:", tasks.length);
+          console.log("   parsed.milestones length:", milestones.length);
+          if (tasks.length > 0) {
+            console.log("   first task emp_id:", tasks[0].emp_id);
+          }
+        } catch (err) {
+          console.warn(
+            `   ❌ PMS fetch FAILED for project ${p.pms_project_id}:`,
+            err.message,
+          );
+        }
+
+        // Filter to this employee's tasks
+        const myTasks = tasks.filter((t) => {
+          const match = String(t.emp_id).trim() === String(empId).trim();
+          if (!match) {
+            console.log(
+              `   No match: task.emp_id="${t.emp_id}" vs empId="${empId}"`,
+            );
+          }
+          return match;
+        });
+
+        const completed = myTasks.filter((t) => t.status === "COMPLETED");
+        const inProgress = myTasks.filter((t) => t.status === "STARTED");
+        const pending = myTasks.filter((t) => t.status === "YET_TO_START");
+        const inactive = myTasks.filter((t) => t.status === "INACTIVE");
+
+        // Compute span of her tasks in this project
+        const startDates = myTasks
+          .map((t) => t.planned_start_date)
+          .filter(Boolean)
+          .sort();
+        const endDates = myTasks
+          .map((t) => t.planned_end_date)
+          .filter(Boolean)
+          .sort();
+
+        const taskStart = startDates[0] || null;
+        const taskEnd = endDates[endDates.length - 1] || null;
+
+        let taskSpanDays = null;
+        if (taskStart && taskEnd) {
+          taskSpanDays =
+            Math.ceil(
+              (new Date(taskEnd) - new Date(taskStart)) / (1000 * 60 * 60 * 24),
+            ) + 1;
+        }
+
+        const actualStarts = myTasks
+          .map((t) => t.actual_start_date)
+          .filter(Boolean)
+          .sort();
+        const actualEnds = myTasks
+          .map((t) => t.actual_end_date)
+          .filter(Boolean)
+          .sort();
+
+        const taskActualStart = actualStarts[0] || null;
+        const taskActualEnd = actualEnds[actualEnds.length - 1] || null;
+
+        return {
+          project_info_id: p.project_info_id,
+          pms_project_id: p.pms_project_id,
+          project_code: p.project_code,
+          project_category_code: p.sub_category,
+          description: p.description,
+
+          // Task counts
+          assigned_task_count: p.assigned_task_count,
+          assigned_units: p.assigned_units,
+          completed_tasks: completed.length,
+          in_progress_tasks: inProgress.length,
+          pending_tasks: pending.length,
+          inactive_tasks: inactive.length,
+          total_tasks_in_project: myTasks.length,
+
+          // Planned dates (from PMS)
+          task_planned_start_date: taskStart,
+          task_planned_end_date: taskEnd,
+          task_span_days: taskSpanDays,
+
+          // Actual dates (from PMS)
+          task_actual_start_date: taskActualStart,
+          task_actual_end_date: taskActualEnd,
+
+          // Status summary as an object
+          task_status_summary: {
+            COMPLETED: completed.length,
+            STARTED: inProgress.length,
+            YET_TO_START: pending.length,
+            INACTIVE: inactive.length,
+            other:
+              myTasks.length -
+              completed.length -
+              inProgress.length -
+              pending.length -
+              inactive.length,
+          },
+
+          // Per-task rows for the frontend table
+          tasks: myTasks.map((t) => ({
+            task_id: t.task_id,
+            task_title: t.task_title,
+            status: t.status,
+            planned_start_date: t.planned_start_date,
+            planned_end_date: t.planned_end_date,
+            actual_start_date: t.actual_start_date,
+            actual_end_date: t.actual_end_date,
+            no_days_required: t.no_days_required,
+            emp_id: t.emp_id,
+            emp_name: t.emp_name,
+          })),
+
+          // Effort
+          assigned_days: Number(p.assigned_days) || 0,
+          assigned_hours: (Number(p.assigned_days) || 0) * HOURS_PER_DAY,
+
+          // Actual logged
+          logged_hours: Number(p.logged_hours) || 0,
+        };
+      }),
+    );
+
+    // ─── 3. Roll up totals ─────────────────────────────────────────────────
+    const totalAssignedDays = enriched.reduce((s, p) => s + p.assigned_days, 0);
+    const totalAssignedHours = enriched.reduce(
+      (s, p) => s + p.assigned_hours,
+      0,
+    );
+    const totalLoggedHours = enriched.reduce((s, p) => s + p.logged_hours, 0);
+
+    // Overall span: earliest start → latest end across all her projects
+    const allStarts = enriched
+      .map((p) => p.task_start_date)
+      .filter(Boolean)
+      .sort();
+    const allEnds = enriched
+      .map((p) => p.task_end_date)
+      .filter(Boolean)
+      .sort();
+    const overallStart = allStarts[0] || null;
+    const overallEnd = allEnds[allEnds.length - 1] || null;
+
+    let overallSpanDays = null;
+    if (overallStart && overallEnd) {
+      overallSpanDays =
+        Math.ceil(
+          (new Date(overallEnd) - new Date(overallStart)) /
+            (1000 * 60 * 60 * 24),
+        ) + 1;
+    }
+
+    // ─── 4. Response ───────────────────────────────────────────────────────
+    return res.status(200).json({
+      success: true,
+      emp_id: empId,
+      total_projects: enriched.length,
+
+      totals: {
+        total_assigned_days: totalAssignedDays,
+        total_assigned_hours: totalAssignedHours,
+        total_logged_hours: totalLoggedHours,
+      },
+
+      projects: enriched,
+    });
+  } catch (err) {
+    console.error("❌ getEmployeeUtilization error:", err.message);
+    const { status, body } = normalizePMSError(err);
+    return res.status(status).json(body);
+  }
+};
+
+
+
 module.exports = {
   getDashboardOverview,
+  getEmployeeUtilization,
+  getAllEmployeesUtilization,
 };
