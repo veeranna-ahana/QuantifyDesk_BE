@@ -1,6 +1,14 @@
 const { query, quantifyPool } = require("../config/db");
 const { getUatToken } = require("../../helpers/pmsTokenStore");
 const { pmsGet, extractProjects } = require("../../helpers/pmsHelper");
+const {
+  PROJECT_TYPES,
+  DEFAULT_PROJECT_TYPE,
+} = require("../constants/projectTypes");
+const { HRS_PER_DAY } = require("../constants/effort");
+const {
+  fetchCategoryTimesheetsGroupedByEmployee,
+} = require("./projectTimesheet.controller");
 
 // ============================================================================
 // Import Project — Step 1 (Project Info)
@@ -127,6 +135,22 @@ function computeTaskStats(milestoneDetails, tasksDetails) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Converts an effort_estimate row's days into hours at HRS_PER_DAY, rounded to 2 decimals
+// (days can be fractional, e.g. 12.5). Used on create/update so the *_hours columns are
+// stored, not just derived at read time — see effort_estimate_hours.sql migration notes.
+// ─────────────────────────────────────────────────────────────────────────
+function computeEffortHours(effortDays, bufferDays) {
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const effortHours = round2((Number(effortDays) || 0) * HRS_PER_DAY);
+  const bufferHours = round2((Number(bufferDays) || 0) * HRS_PER_DAY);
+  return {
+    effortHours,
+    bufferHours,
+    totalHours: round2(effortHours + bufferHours),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // GET /api/import-project/pms-sync?projectId=X
 // Calls PMS getProjectDetails and returns projectDetails as-is (same
 // pass-through style as fetchPMSProjectDetails in project.controller.js),
@@ -162,8 +186,33 @@ const syncPmsProject = async (req, res, next) => {
 
     const { projectDetails, milestoneDetails, tasksDetails } = data || {};
 
-    if (!projectDetails) {
-      return res.status(404).json({ message: "Project not found in PMS" });
+    // PMS doesn't always 404 for a bad/non-existent project ID — for some
+    // invalid IDs it responds 200 with an empty/near-empty object instead
+    // of throwing. Treat "no real project data came back" the same as a
+    // 404, whichever shape PMS used, so the frontend gets one consistent,
+    // clear error either way.
+    const hasProjectData =
+      projectDetails &&
+      typeof projectDetails === "object" &&
+      Object.keys(projectDetails).length > 0 &&
+      (projectDetails.project_id || projectDetails.project_name);
+
+    if (!hasProjectData) {
+      return res.status(404).json({
+        message: `No project found in PMS for project ID "${projectId}". Please check the ID and try again.`,
+      });
+    }
+
+    // Only an APPROVED PMS project can be imported — anything else (INACTIVE, ON_HOLD,
+    // WAITING_FOR_APPROVAL, REJECTED, COMPLETED, etc.) is rejected here, before any of its data
+    // is sent back, so the frontend never has PMS data to populate Steps 1-4 with in the first
+    // place (the popup + "no data populated" requirement is enforced by simply not returning it).
+    const pmsStatus = String(projectDetails.status || "").toUpperCase();
+    if (pmsStatus !== "APPROVED") {
+      return res.status(409).json({
+        message: `This PMS project's status is "${projectDetails.status || "Unknown"}" — only APPROVED projects can be synced/imported.`,
+        pms_status: projectDetails.status || null,
+      });
     }
 
     const safeMilestones = milestoneDetails || [];
@@ -181,13 +230,36 @@ const syncPmsProject = async (req, res, next) => {
     if (err.response) {
       if (err.response.status === 401) {
         return res.status(401).json({
-          message: "Authentication failed with PMS API",
-          error: "Invalid or expired token",
+          message:
+            "PMS session expired or invalid. Please log in again to refresh your PMS access.",
         });
       }
       if (err.response.status === 404) {
-        return res.status(404).json({ message: "Project not found in PMS" });
+        return res.status(404).json({
+          message: `No project found in PMS for project ID "${req.query.projectId}". Please check the ID and try again.`,
+        });
       }
+      // Any other PMS-side status (400/422/etc for a malformed ID, 500 on
+      // their end) — surface PMS's own message when it sent one, instead
+      // of always falling through to a generic 500.
+      return res.status(err.response.status).json({
+        message:
+          err.response.data?.message ||
+          "PMS API returned an error while fetching project details.",
+      });
+    }
+
+    if (err.code === "ECONNABORTED") {
+      return res.status(504).json({
+        message:
+          "PMS API timed out while fetching project details. Please try again.",
+      });
+    }
+
+    if (err.code === "ENOTFOUND" || err.code === "ECONNREFUSED") {
+      return res.status(503).json({
+        message: "PMS API is currently unreachable. Please try again later.",
+      });
     }
 
     return res.status(500).json({
@@ -218,6 +290,106 @@ const getRoles = async (req, res, next) => {
   } catch (err) {
     return next(err);
   }
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// GET /api/import-project/task-catalog?role=BA
+// Task Info's Edit Task Details drawer (and Bulk Update) needs the Task
+// Type dropdown to depend on the selected Role — e.g. role=BA returns
+// ["BA-BRD", "BA-TDD", "BA-Requirements Sign Off", ...], role=UI returns
+// ["UI design/ Figma", "UI Review", "UI Signoff"], all straight from
+// role_task_catalog.task_name for that role, in the table's own row order.
+// ─────────────────────────────────────────────────────────────────────────
+const getTaskCatalogByRole = async (req, res, next) => {
+  try {
+    const { role } = req.query;
+
+    if (!role) {
+      return res.status(400).json({ message: "role is required" });
+    }
+
+    const rows = await query(
+      `SELECT task_name, unit_type
+         FROM role_task_catalog
+        WHERE role = ?
+        ORDER BY id ASC`,
+      [role],
+    );
+
+    return res.status(200).json({
+      taskTypes: rows.map((r) => r.task_name),
+    });
+  } catch (err) {
+    return next(err);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// GET /api/import-project/employees
+// Effort Estimate (Step 3)'s "+ Add Member" picker — active employees from
+// the master DB's emp table, not something we own or duplicate locally.
+// Only emp_id + emp_name are returned; effort_estimate stores emp_id only
+// and this name is re-joined live at read time (getProjectView), same
+// principle as PMS-owned data never being persisted here.
+// ─────────────────────────────────────────────────────────────────────────
+const getActiveEmployees = async (req, res, next) => {
+  try {
+    const employees = await query(
+      `SELECT emp_id, emp_name
+         FROM master.emp
+        WHERE flag = 'Active'
+        ORDER BY emp_name ASC`,
+    );
+
+    return res.status(200).json({ employees });
+  } catch (err) {
+    return next(err);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// GET /api/import-project/me
+// Resolves the logged-in user's display name from their own JWT's emp_id —
+// this is the SAME lookup Create Project uses server-side to stamp
+// document_checklist.uploaded_by, so the frontend's optimistic "Uploaded by
+// <you>" preview (shown before Create Project is even submitted) is
+// guaranteed to match what actually gets persisted, instead of depending on
+// whatever happens to be sitting in the frontend's Redux/cookie auth state
+// (which varies by which login path was used and isn't always kept in sync
+// with a fresh emp_name).
+// ─────────────────────────────────────────────────────────────────────────
+const getCurrentUser = async (req, res, next) => {
+  try {
+    const empId = req.user?.emp_id;
+    if (!empId) {
+      return res.status(401).json({ message: "No emp_id on token" });
+    }
+
+    const rows = await query(
+      `SELECT emp_id, emp_name FROM master.emp WHERE emp_id = ? LIMIT 1`,
+      [empId],
+    );
+
+    return res
+      .status(200)
+      .json({ emp_id: empId, emp_name: rows[0]?.emp_name || null });
+  } catch (err) {
+    return next(err);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// GET /api/import-project/project-types
+// Project Info (Step 1) needs a Project Type dropdown, but the 3 allowed
+// values are maintained here in the backend — a plain const list in
+// src/constants/projectTypes.js, not a DB table — rather than hardcoded on
+// the frontend, so they can be changed without a frontend deploy.
+// ─────────────────────────────────────────────────────────────────────────
+const getProjectTypes = (req, res) => {
+  return res.status(200).json({
+    projectTypes: PROJECT_TYPES,
+    defaultProjectType: DEFAULT_PROJECT_TYPE,
+  });
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -330,6 +502,9 @@ const createProjectInfo = async (req, res, next) => {
     }
 
     // ── effort_estimate ─────────────────────────────────────────────────
+    // effort_hours/buffer_hours/total_hours are computed from effort_days/buffer_days *
+    // HRS_PER_DAY and stored alongside them (see computeEffortHours below) — not just derived
+    // at read time — so a historical estimate's hours stay correct even if HRS_PER_DAY changes.
     for (const estimate of effort_estimates) {
       const { emp_id, role, effort_days, buffer_days } = estimate;
 
@@ -337,27 +512,54 @@ const createProjectInfo = async (req, res, next) => {
         continue; // an effort row with no member/role attached to it isn't useful
       }
 
+      const { effortHours, bufferHours, totalHours } = computeEffortHours(
+        effort_days,
+        buffer_days,
+      );
+
       await connection.execute(
         `INSERT INTO effort_estimate
-           (project_info_id, emp_id, role, effort_days, buffer_days)
-         VALUES (?, ?, ?, ?, ?)`,
-        [projectInfoId, emp_id, role, effort_days || null, buffer_days || null],
+           (project_info_id, emp_id, role, effort_days, effort_hours, buffer_days, buffer_hours, total_hours)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          projectInfoId,
+          emp_id,
+          role,
+          effort_days || null,
+          effortHours,
+          buffer_days || null,
+          bufferHours,
+          totalHours,
+        ],
       );
     }
 
     // ── document_checklist ──────────────────────────────────────────────
+    // A document is either one of the 16 fixed document_master rows (document_id set, name
+    // never duplicated here — joined from document_master at read time) OR a custom one added
+    // via "Add Document" on the frontend (document_id null, name stored directly in
+    // custom_document_name since there's no master row to join to) — either is a valid row
+    // here, so this only requires a link + ONE of the two identifiers, not document_id
+    // specifically (that was the bug: a custom document has no document_id at all, so it was
+    // being silently skipped here every time).
     for (const doc of documents) {
-      const { document_id, sharepoint_url } = doc;
+      const { document_id, document_name, sharepoint_url } = doc;
 
-      if (!document_id || !sharepoint_url) {
+      if (!sharepoint_url || (!document_id && !document_name)) {
         continue; // no link yet -> stays "Pending" on the frontend, no row needed
       }
 
       await connection.execute(
         `INSERT INTO document_checklist
-           (project_info_id, document_id, sharepoint_url, status, uploaded_by, uploaded_date)
-         VALUES (?, ?, ?, 'Uploaded', ?, NOW())`,
-        [projectInfoId, document_id, sharepoint_url, uploadedBy],
+           (project_info_id, document_id, custom_document_name, sharepoint_url, status, uploaded_by, uploaded_date)
+         VALUES (?, ?, ?, ?, 'Uploaded', ?, NOW())`,
+        [
+          projectInfoId,
+          document_id || null,
+          document_id ? null : document_name || null,
+          sharepoint_url,
+          uploadedBy,
+        ],
       );
     }
 
@@ -465,7 +667,13 @@ const getImportedProjects = async (req, res, next) => {
         status: pmsProject?.status || null,
         planned_start_date: pmsProject?.planned_start_date || null,
         planned_end_date: pmsProject?.planned_end_date || null,
+        actual_start_date: pmsProject?.actual_start_date || null,
+        actual_end_date: pmsProject?.actual_end_date || null,
         description: pmsProject?.description || null,
+        // Confirmed against a real getAllProjects response: project_coordinator is present
+        // on list items too (not just getProjectDetails), and maps to the Projects table's
+        // "Owner" column.
+        project_coordinator: pmsProject?.project_coordinator || null,
         // ── Locally owned ─────────────────────────────────────────────
         project_type: row.project_type,
         nbd_id: row.nbd_id,
@@ -569,8 +777,19 @@ const getProjectView = async (req, res, next) => {
         projectDetails?.presales_id || projectDetails?.presale_id || null,
       start_date: projectDetails?.planned_start_date || null,
       end_date: projectDetails?.planned_end_date || null,
+      // Explicit planned vs actual — `start_date`/`end_date` above are kept as-is (Project
+      // Info tab's single Start/End Date fields already read those, and have always meant
+      // "planned"), but Project Overview's two date cards need both, clearly distinguished,
+      // instead of only ever showing the planned pair under a plain "Start Date"/"End Date"
+      // label. Same PMS project object, just the actual_* fields alongside the planned ones —
+      // null (not guessed) if PMS hasn't recorded an actual date yet (e.g. project not started).
+      planned_start_date: projectDetails?.planned_start_date || null,
+      planned_end_date: projectDetails?.planned_end_date || null,
+      actual_start_date: projectDetails?.actual_start_date || null,
+      actual_end_date: projectDetails?.actual_end_date || null,
       project_status: projectDetails?.status || null,
       description: projectDetails?.description || null,
+      project_coordinator: projectDetails?.project_coordinator || null,
       // ── Locally owned ─────────────────────────────────────────────────
       project_type: project.project_type,
       nbd_id: project.nbd_id,
@@ -595,10 +814,9 @@ const getProjectView = async (req, res, next) => {
     // via `project_milestone_id` (matching the milestone's `milestone_id`),
     // the milestone's display name is `milestone_title`, and the assignee
     // is `emp_name` (falling back to `emp_id`) — PMS has no `owner` field.
-    // risk_category/remark/allocation are also PMS-owned and live — not in
-    // the sample payload we've seen, so the keys below (`risk_category`,
-    // `remark`, `allocation`) are a best guess pending confirmation of the
-    // exact field names PMS actually uses for these three.
+    // risk_category/remark/allocation are also PMS-owned and live, read-only — not in the
+    // sample payload we've seen, so the keys below (`risk_category`, `remark`, `allocation`)
+    // are a best guess pending confirmation of the exact field names PMS actually uses.
     const tasksByMilestoneId = new Map();
     for (const task of tasksDetails) {
       const milestoneId = String(task.project_milestone_id ?? "");
@@ -606,6 +824,31 @@ const getProjectView = async (req, res, next) => {
         tasksByMilestoneId.set(milestoneId, []);
       }
       tasksByMilestoneId.get(milestoneId).push(task);
+    }
+
+    // "Last Completed" — same rule as Daily Reports' classifyProjectTasks (dailyReport.controller.js):
+    // among a project's COMPLETED tasks, the most recently completed task PER EMPLOYEE (by
+    // actual_end_date, ties broken by the higher task_id) is that employee's "last completed"
+    // task. Computed project-wide (across every milestone) before the per-milestone task mapping
+    // below, then applied to each task as `is_last_completed` so Task Info's table can flag it
+    // exactly like Daily Report's task table does. Grouped by PMS's own raw assignee (t.emp_id
+    // from tasksDetails), not task_info's locally-owned role overlay, since "last completed"
+    // is about who actually did the work, not who a role tag was later assigned to.
+    const completedByRecency = tasksDetails
+      .filter((t) => t.status === "COMPLETED")
+      .sort((a, b) => {
+        const da = new Date(a.actual_end_date || 0).getTime() || 0;
+        const db = new Date(b.actual_end_date || 0).getTime() || 0;
+        if (db !== da) return db - da;
+        return (Number(b.task_id) || 0) - (Number(a.task_id) || 0);
+      });
+    const lastCompletedTaskIds = new Set();
+    const seenEmp = new Set();
+    for (const t of completedByRecency) {
+      const empKey = t.emp_id ?? t.emp_name ?? null;
+      if (empKey == null || seenEmp.has(empKey)) continue;
+      seenEmp.add(empKey);
+      lastCompletedTaskIds.add(t.task_id);
     }
 
     const milestones = milestoneDetails.map((milestone) => {
@@ -632,9 +875,12 @@ const getProjectView = async (req, res, next) => {
           remark: t.remark ?? null,
           allocation: t.allocation ?? null,
           // ── Locally owned (editable, from task_info) ─────────────────
+          emp_id: overlay.emp_id ?? null,
           role: overlay.role ?? null,
           task_type: overlay.task_type ?? null,
           unit: overlay.unit ?? null,
+          // ── Derived (see completedByRecency above) ────────────────────
+          is_last_completed: lastCompletedTaskIds.has(taskId),
         };
       });
 
@@ -674,40 +920,248 @@ const getProjectView = async (req, res, next) => {
     };
 
     // ── Effort Estimate tab ─────────────────────────────────────────────
-    const effort_estimates = await query(
-      `SELECT emp_id, role, effort_days, buffer_days
-         FROM effort_estimate
-        WHERE project_info_id = ?`,
+    // emp_name is never stored on effort_estimate — joined live from master.emp by emp_id,
+    // same principle as PMS-owned data. The project-wide total (overall_total_hours) is just
+    // SUM(total_hours) computed here, not a separately stored/maintained value.
+    const effortRows = await query(
+      `SELECT ee.emp_id, e.emp_name, ee.role, ee.effort_days, ee.effort_hours,
+              ee.buffer_days, ee.buffer_hours, ee.total_hours
+         FROM effort_estimate ee
+         LEFT JOIN master.emp e ON e.emp_id = ee.emp_id
+        WHERE ee.project_info_id = ?`,
       [projectInfoId],
     );
+
+    const effort_estimates = {
+      members: effortRows,
+      overall_total_hours: effortRows.reduce(
+        (sum, r) => sum + Number(r.total_hours || 0),
+        0,
+      ),
+    };
+
+    // ── Project Overview tab ────────────────────────────────────────────
+    // Built mostly from data already assembled above (milestones' tasks + effortRows), plus one
+    // extra call for real Logged Hours — HRMS timesheets matched by project_info.sub_category
+    // (== HRMS's projectcategory_code, the same link the Timesheet Data tab uses), grouped by
+    // employee via fetchCategoryTimesheetsGroupedByEmployee. Matched back to effort_estimate rows
+    // by emp_id === HRMS's employee_id. If sub_category isn't set, or HRMS has no rows for it,
+    // logged hours stay 0 — never guessed. Risk still has NO real source (PMS has no
+    // project-level risk field, and we don't store one locally either) — left null, shown as `—`.
+    let loggedHoursByEmpId = new Map();
+    if (project.sub_category) {
+      try {
+        const hrms = await fetchCategoryTimesheetsGroupedByEmployee(
+          project.sub_category,
+        );
+        if (hrms?.success !== false) {
+          loggedHoursByEmpId = new Map(
+            (hrms.data || []).map((r) => [
+              String(r.employee_id),
+              Number(r.total_hours) || 0,
+            ]),
+          );
+        }
+      } catch (hrmsErr) {
+        console.error(
+          "Error fetching HRMS logged hours for project overview:",
+          hrmsErr.message,
+        );
+        // Falls through with an empty map — logged_hours stays 0 rather than failing the tab.
+      }
+    }
+
+    const allTasks = milestones.flatMap((m) => m.tasks);
+
+    // Per-ROLE task counts (Tasks/Done/Pending/Units), from the same PMS-status +
+    // task_info-overlay join the Task Info tab already computed above.
+    //
+    // Joined by ROLE, not emp_id: task_info.emp_id is just PMS's own raw task assignee,
+    // read-only everywhere in the app (EditTaskDrawer shows it as "Task Owner" and never lets
+    // anyone change it) — it's whoever PMS's project data happens to list, not necessarily
+    // anyone on our effort_estimate team. task_info.role, on the other hand, IS user-set (the
+    // Edit Task drawer's Role field, from the same role_task_catalog roles Effort Estimate
+    // uses), so it's the one real link between a task and an effort_estimate row. Caveat: if
+    // two different people share the same role in Effort Estimate, both currently get credited
+    // with that role's full task/unit stats, since task_info has no per-person task assignment
+    // of its own — flagged here rather than silently double-counted without explanation.
+    const taskStatsByRole = new Map();
+    for (const t of allTasks) {
+      if (!t.role) continue; // no role overlay set on this task yet — not counted
+      if (!taskStatsByRole.has(t.role)) {
+        taskStatsByRole.set(t.role, {
+          tasks: 0,
+          done: 0,
+          pending: 0,
+          units: 0,
+        });
+      }
+      const s = taskStatsByRole.get(t.role);
+      s.tasks += 1;
+      s.units += Number(t.unit) || 0;
+      if (normalizeTaskStatus(t.status) === "completed") s.done += 1;
+      else s.pending += 1;
+    }
+    const EMPTY_STATS = { tasks: 0, done: 0, pending: 0, units: 0 };
+
+    // Team Members table: one row per person (a person can hold more than one role — see the
+    // multi-role Effort Estimate fix — so their alloc_hours AND task/unit stats here are summed
+    // across all their effort_estimate rows/roles).
+    const teamMembersMap = new Map();
+    for (const row of effortRows) {
+      if (!teamMembersMap.has(row.emp_id)) {
+        teamMembersMap.set(row.emp_id, {
+          emp_id: row.emp_id,
+          emp_name: row.emp_name,
+          role: row.role,
+          alloc_hours: 0,
+          logged_hours: loggedHoursByEmpId.get(String(row.emp_id)) || 0,
+          tasks: 0,
+          done: 0,
+          pending: 0,
+          units: 0,
+        });
+      }
+      const m = teamMembersMap.get(row.emp_id);
+      m.alloc_hours += Number(row.total_hours) || 0;
+      const s = taskStatsByRole.get(row.role) || EMPTY_STATS;
+      m.tasks += s.tasks;
+      m.done += s.done;
+      m.pending += s.pending;
+      m.units += s.units;
+    }
+    const team_members = [...teamMembersMap.values()];
+
+    // Task Allocation & Timesheet Details table: one row per effort_estimate row (person +
+    // role, so a multi-role person gets a row per role here, unlike the Team Members table
+    // above) enriched with that ROLE's task/unit stats.
+    const task_allocation = effortRows.map((row) => {
+      const s = taskStatsByRole.get(row.role) || EMPTY_STATS;
+      const allocHours = Number(row.total_hours) || 0;
+      // HRMS's logged hours are tracked per EMPLOYEE, not per (employee, role) — there's no way
+      // to split a person's logged hours across their multiple roles here, so a multi-role
+      // person's full logged total is shown against each of their role rows (same caveat as
+      // tasks/units above, which are also joined by role rather than a per-row assignment).
+      const loggedHours = loggedHoursByEmpId.get(String(row.emp_id)) || 0;
+      const hasLoggedData = loggedHoursByEmpId.has(String(row.emp_id));
+      return {
+        emp_id: row.emp_id,
+        emp_name: row.emp_name,
+        role: row.role,
+        units: s.units,
+        tasks: s.tasks,
+        completed: s.done,
+        pending: s.pending,
+        alloc_hours: allocHours,
+        // Progress here is task-completion progress (completed/tasks), which is real, live PMS
+        // task-status data — it doesn't need HRMS at all.
+        progress_percent:
+          s.tasks > 0 ? Math.round((s.done / s.tasks) * 100) : null,
+        logged_hours: loggedHours,
+        // Only computed once there's an actual HRMS row for this employee — otherwise left null
+        // (renders as `—`) rather than a misleading "-32h" variance against zero logged hours.
+        variance_hours: hasLoggedData
+          ? Math.round((loggedHours - allocHours) * 100) / 100
+          : null,
+        // Confirmed rule: Logged > Allocated by more than 1h = Over Utilized, Logged < Allocated
+        // by more than 1h = Under Utilized, within ±1h = Optimally Used. Only computed once
+        // there's an actual HRMS row for this employee — otherwise left null (renders `—`).
+        status: hasLoggedData
+          ? loggedHours - allocHours > 1
+            ? "Over Utilized"
+            : allocHours - loggedHours > 1
+              ? "Under Utilized"
+              : "Optimally Used"
+          : null,
+      };
+    });
+
+    // Project-wide completion % (the header's "Completion" stat) — completed / total tasks
+    // across every milestone, same task-status data as everything else above.
+    const completion_percent =
+      allTasks.length === 0
+        ? 0
+        : Math.round(
+            (allTasks.filter(
+              (t) => normalizeTaskStatus(t.status) === "completed",
+            ).length /
+              allTasks.length) *
+              100,
+          );
+
+    const overview = {
+      completion_percent,
+      team_members_count: team_members.length,
+      total_units: allTasks.reduce((sum, t) => sum + (Number(t.unit) || 0), 0),
+      total_hours_allocated: effort_estimates.overall_total_hours,
+      // Sum of the SAME per-team-member logged hours shown in the Team Members table above (one
+      // real HRMS total per distinct employee) — not summed from task_allocation, which would
+      // double-count a multi-role person's hours once per role.
+      total_hours_utilized: team_members.reduce(
+        (sum, m) => sum + (Number(m.logged_hours) || 0),
+        0,
+      ),
+      risk: null,
+      team_members,
+      task_allocation,
+    };
 
     // ── Document Checklist tab ──────────────────────────────────────────
     // LEFT JOIN so every one of the 16 document_master rows shows up even
     // when nothing has been linked yet for this project ("Pending").
+    // uploaded_by is stored as an emp_id (whoever was logged in when the link was added,
+    // from req.user.emp_id) — never a name — and resolved live via master.emp here, same
+    // principle as effort_estimate's emp_name.
     const documents = await query(
       `SELECT dm.document_id, dm.document_name,
-              dc.sharepoint_url, dc.status, dc.uploaded_by, dc.uploaded_date
+              dc.sharepoint_url, dc.status, dc.uploaded_by AS uploaded_by_emp_id,
+              e.emp_name AS uploaded_by_name, dc.uploaded_date
          FROM document_master dm
          LEFT JOIN document_checklist dc
            ON dc.document_id = dm.document_id AND dc.project_info_id = ?
+         LEFT JOIN master.emp e ON e.emp_id = dc.uploaded_by
         ORDER BY dm.document_id ASC`,
       [projectInfoId],
     );
 
-    const documentsWithStatus = documents.map((doc) => ({
-      document_id: doc.document_id,
-      document_name: doc.document_name,
-      sharepoint_url: doc.sharepoint_url || null,
-      status: doc.status || "Pending",
-      uploaded_by: doc.uploaded_by || null,
-      uploaded_date: doc.uploaded_date || null,
-    }));
+    // Custom documents ("Add Document" on the frontend, not one of the 16 document_master
+    // rows) have document_id NULL, so the LEFT JOIN above can never surface them — it only ever
+    // walks document_master's fixed list. Fetch those separately and append them.
+    const customDocuments = await query(
+      `SELECT dc.custom_document_name, dc.sharepoint_url, dc.status,
+              dc.uploaded_by AS uploaded_by_emp_id, e.emp_name AS uploaded_by_name, dc.uploaded_date
+         FROM document_checklist dc
+         LEFT JOIN master.emp e ON e.emp_id = dc.uploaded_by
+        WHERE dc.project_info_id = ? AND dc.document_id IS NULL
+        ORDER BY dc.uploaded_date ASC`,
+      [projectInfoId],
+    );
+
+    const documentsWithStatus = [
+      ...documents.map((doc) => ({
+        document_id: doc.document_id,
+        document_name: doc.document_name,
+        sharepoint_url: doc.sharepoint_url || null,
+        status: doc.status || "Pending",
+        uploaded_by: doc.uploaded_by_name || null,
+        uploaded_date: doc.uploaded_date || null,
+      })),
+      ...customDocuments.map((doc) => ({
+        document_id: null,
+        document_name: doc.custom_document_name,
+        sharepoint_url: doc.sharepoint_url || null,
+        status: doc.status || "Uploaded",
+        uploaded_by: doc.uploaded_by_name || null,
+        uploaded_date: doc.uploaded_date || null,
+      })),
+    ];
 
     return res.status(200).json({
       project_info: projectInfoTab,
       task_info: taskInfoTab,
       effort_estimates,
       documents: documentsWithStatus,
+      overview,
     });
   } catch (err) {
     return next(err);
@@ -820,31 +1274,58 @@ const updateProjectInfo = async (req, res, next) => {
         continue;
       }
 
+      const { effortHours, bufferHours, totalHours } = computeEffortHours(
+        effort_days,
+        buffer_days,
+      );
+
       await connection.execute(
-        `INSERT INTO effort_estimate (project_info_id, emp_id, role, effort_days, buffer_days)
-         VALUES (?, ?, ?, ?, ?)`,
-        [projectInfoId, emp_id, role, effort_days || null, buffer_days || null],
+        `INSERT INTO effort_estimate
+           (project_info_id, emp_id, role, effort_days, effort_hours, buffer_days, buffer_hours, total_hours)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          projectInfoId,
+          emp_id,
+          role,
+          effort_days || null,
+          effortHours,
+          buffer_days || null,
+          bufferHours,
+          totalHours,
+        ],
       );
     }
 
     // ── document_checklist (upsert) ─────────────────────────────────────
+    // Same document_id-OR-document_name rule as Create Project (see comment there). Note the
+    // upsert (ON DUPLICATE KEY) only actually re-uses a row for the document_master case — a
+    // custom document has document_id NULL, and MySQL treats every NULL as distinct for a
+    // unique key, so re-submitting the same custom document name on a later edit currently
+    // inserts a new row rather than updating the old one. Fine for now (nothing edits a custom
+    // document's link yet), but worth a real dedupe key (e.g. on document_name) if that's added.
     for (const doc of documents) {
-      const { document_id, sharepoint_url } = doc;
+      const { document_id, document_name, sharepoint_url } = doc;
 
-      if (!document_id || !sharepoint_url) {
+      if (!sharepoint_url || (!document_id && !document_name)) {
         continue;
       }
 
       await connection.execute(
         `INSERT INTO document_checklist
-           (project_info_id, document_id, sharepoint_url, status, uploaded_by, uploaded_date)
-         VALUES (?, ?, ?, 'Uploaded', ?, NOW())
+           (project_info_id, document_id, custom_document_name, sharepoint_url, status, uploaded_by, uploaded_date)
+         VALUES (?, ?, ?, ?, 'Uploaded', ?, NOW())
          ON DUPLICATE KEY UPDATE
            sharepoint_url = VALUES(sharepoint_url),
            status = VALUES(status),
            uploaded_by = VALUES(uploaded_by),
            uploaded_date = VALUES(uploaded_date)`,
-        [projectInfoId, document_id, sharepoint_url, uploadedBy],
+        [
+          projectInfoId,
+          document_id || null,
+          document_id ? null : document_name || null,
+          sharepoint_url,
+          uploadedBy,
+        ],
       );
     }
 
@@ -886,6 +1367,10 @@ const updateProjectInfo = async (req, res, next) => {
 module.exports = {
   syncPmsProject,
   getRoles,
+  getTaskCatalogByRole,
+  getActiveEmployees,
+  getCurrentUser,
+  getProjectTypes,
   getDocumentMaster,
   createProjectInfo,
   updateProjectInfo,

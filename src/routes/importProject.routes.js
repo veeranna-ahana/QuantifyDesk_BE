@@ -5,6 +5,10 @@ const { authMiddleware } = require("../middleware/auth.middleware");
 const {
   syncPmsProject,
   getRoles,
+  getTaskCatalogByRole,
+  getActiveEmployees,
+  getCurrentUser,
+  getProjectTypes,
   getDocumentMaster,
   createProjectInfo,
   updateProjectInfo,
@@ -26,6 +30,29 @@ router.get("/pms-sync", authMiddleware, syncPmsProject);
 // Dev, BE Dev, Tester) from role_task_catalog, for the Effort Estimate
 // screen's grouping + "+ Add Member" role dropdown.
 router.get("/roles", authMiddleware, getRoles);
+
+// ── Step 2: Task Info (Edit Task Details / Bulk Update) ─────────────────
+// GET /api/import-project/task-catalog?role=BA — task_name options for the
+// Task Type dropdown, filtered by the selected Role, from role_task_catalog.
+router.get("/task-catalog", authMiddleware, getTaskCatalogByRole);
+
+// ── Step 3: Effort Estimate ─────────────────────────────────────────────
+// GET /api/import-project/employees — active employees from master.emp,
+// for the "+ Add Member" picker.
+router.get("/employees", authMiddleware, getActiveEmployees);
+
+// ── Document Checklist (Step 4) "Uploaded by <you>" preview ─────────────
+// GET /api/import-project/me — resolves the logged-in user's name from
+// their own JWT's emp_id (same lookup Create Project uses server-side to
+// stamp uploaded_by), so the frontend's pre-submit preview always matches
+// what actually gets persisted.
+router.get("/me", authMiddleware, getCurrentUser);
+
+// ── Step 1: Project Info ────────────────────────────────────────────────
+// GET /api/import-project/project-types — the 3 fixed Project Type values
+// (One Time Project / Managed Service / Staff Augmentation), maintained in
+// project_type_catalog so they can change without a frontend deploy.
+router.get("/project-types", authMiddleware, getProjectTypes);
 
 // ── Step 4: Document Checklist ──────────────────────────────────────────
 // GET /api/import-project/documents — the fixed 16-row document_master
