@@ -5,11 +5,14 @@ const { authMiddleware, adminOnly } = require("../middleware/auth.middleware");
 const {
   fetchStoredPmsProjects,
   fetchProjectTasks,
+  getDailyReportOverview,
 } = require("../controller/dailyReport.controller");
 
 router.get("/stored-projects", authMiddleware, fetchStoredPmsProjects);
 
 router.get("/project-tasks", authMiddleware, fetchProjectTasks);
+
+router.get("/overview", authMiddleware, getDailyReportOverview);
 
 module.exports = router;
 /**
@@ -112,7 +115,7 @@ module.exports = router;
  *             schema:
  *               $ref: '#/components/schemas/PmsError'
  */
-router.get('/stored-projects', fetchStoredPmsProjects); 
+router.get("/stored-projects", fetchStoredPmsProjects);
 
 /**
  * @swagger
@@ -219,7 +222,7 @@ router.get('/stored-projects', fetchStoredPmsProjects);
  *             schema:
  *               $ref: '#/components/schemas/PmsError'
  */
-router.get('/project-tasks', fetchProjectTasks);
+router.get("/project-tasks", fetchProjectTasks);
 
 /**
  * @swagger
