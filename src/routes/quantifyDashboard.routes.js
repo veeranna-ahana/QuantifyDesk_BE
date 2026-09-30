@@ -4,8 +4,8 @@ const router = express.Router();
 const { authMiddleware } = require("../middleware/auth.middleware");
 const {
   getDashboardOverview,
-  getEmployeeUtilization,
   getAllEmployeesUtilization,
+  getEmployeeUtilization,
 } = require("../controller/quantifyDashboard.controller");
 
 // ── Dashboard ────────────────────────────────────────────────────────────
@@ -13,9 +13,15 @@ const {
 // Overview, Project Status Distribution and Project Delivery Performance
 // table, in one call, scoped to imported projects only.
 router.get("/overview", authMiddleware, getDashboardOverview);
-router.get('/employee/:emp_id', getEmployeeUtilization);
-router.get('/all-employees', getAllEmployeesUtilization);
 
+// ── Employee Utilization ─────────────────────────────────────────────────
+// GET /api/import-project/dashboard/all-employees — every employee with any
+// assignment across imported projects, for the Employee Utilization table.
+router.get("/all-employees", authMiddleware, getAllEmployeesUtilization);
+
+// GET /api/import-project/dashboard/employee/:emp_id — one employee's
+// per-project drill-down, for the Employee Utilization row's expanded detail.
+router.get("/employee/:emp_id", authMiddleware, getEmployeeUtilization);
 
 module.exports = router;
 

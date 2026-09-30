@@ -242,6 +242,9 @@ function shapeTask(t, meta) {
     actual_start_date: t.actual_start_date,
     actual_end_date: t.actual_end_date,
     project_milestone_id: t.project_milestone_id,
+    // "NO" is PMS's own way of saying "no dependency" — same convention importProject.controller.js
+    // uses elsewhere for this field.
+    dependency: t.dependency && t.dependency !== "NO" ? t.dependency : null,
 
     role: meta?.role ?? null,
     task_type: meta?.task_type ?? null,
