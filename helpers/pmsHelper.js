@@ -74,7 +74,7 @@ async function pmsGet(uatToken, path, query = {}, options = {}) {
   const headers = getPMSHeaders(uatToken);
   const timeout = options.timeout ?? DEFAULT_TIMEOUT;
 
-  console.log("📡 PMS GET:", url);
+  // console.log("📡 PMS GET:", url);
 
   const response = await axios.get(url, {
     headers,
@@ -100,7 +100,7 @@ async function pmsPost(uatToken, path, body = {}, options = {}) {
   const headers = getPMSHeaders(uatToken);
   const timeout = options.timeout ?? DEFAULT_TIMEOUT;
 
-  console.log("📡 PMS POST:", url);
+  // console.log("📡 PMS POST:", url);
 
   const response = await axios.post(url, body, {
     headers,

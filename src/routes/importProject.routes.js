@@ -3,6 +3,8 @@ const router = express.Router();
 
 const { authMiddleware } = require("../middleware/auth.middleware");
 const {
+  getPmsProjectTitles,
+  getPmsProjectIdByTitle,
   syncPmsProject,
   getRoles,
   getTaskCatalogByRole,
@@ -22,6 +24,13 @@ const {
 router.get("/", authMiddleware, getImportedProjects);
 
 // ── Step 1: Project Info ────────────────────────────────────────────────
+// GET /api/import-project/pms-project-titles — unique PMS project titles,
+// for Step 1's searchable dropdown (replaces the old free-text PMS ID input,
+// since PMS mints a new project_id per version of the same project).
+router.get("/pms-project-titles", authMiddleware, getPmsProjectTitles);
+// GET /api/import-project/pms-project-id-by-title?project_title=X —
+// resolves a chosen title to PMS's current (latest-version) project_id.
+router.get("/pms-project-id-by-title", authMiddleware, getPmsProjectIdByTitle);
 // GET /api/import-project/pms-sync?projectId=X — fetch + pre-fill from PMS
 router.get("/pms-sync", authMiddleware, syncPmsProject);
 

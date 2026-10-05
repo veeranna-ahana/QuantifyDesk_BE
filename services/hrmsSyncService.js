@@ -1,6 +1,6 @@
-const { query } = require('../src/config/db');
-const { getHrmsToken, fetchTimesheetForProject } = require('./hrmsService');
-const { normalizeHrmsTimesheet } = require('../helpers/hrmsHelper');
+const { query } = require("../src/config/db");
+const { getHrmsToken, fetchTimesheetForProject } = require("./hrmsService");
+const { normalizeHrmsTimesheet } = require("../helpers/hrmsHelper");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Concurrency-limited runner
@@ -29,22 +29,23 @@ async function runWithConcurrency(items, limit, worker) {
 // Upsert rows into hrms_timesheet
 // ─────────────────────────────────────────────────────────────────────────────
 async function upsertTimesheetRows(rows) {
-  if (!rows.length) return { inserted: 0, updated: 0, skipped: 0, unchanged: 0 };
+  if (!rows.length)
+    return { inserted: 0, updated: 0, skipped: 0, unchanged: 0 };
 
   const valid = rows.filter(
-    (r) => r.employee_id && r.project_code && r.from_date && r.to_date
+    (r) => r.employee_id && r.project_code && r.from_date && r.to_date,
   );
   const skipped = rows.length - valid.length;
   if (!valid.length) return { inserted: 0, updated: 0, skipped, unchanged: 0 };
 
-  const pool = require('../src/config/db').quantifyPool;
+  const pool = require("../src/config/db").quantifyPool;
 
   const dstr = (v) => {
-    if (!v) return '';
+    if (!v) return "";
     if (v instanceof Date) {
       const y = v.getFullYear();
-      const m = String(v.getMonth() + 1).padStart(2, '0');
-      const d = String(v.getDate()).padStart(2, '0');
+      const m = String(v.getMonth() + 1).padStart(2, "0");
+      const d = String(v.getDate()).padStart(2, "0");
       return `${y}-${m}-${d}`;
     }
     return String(v).slice(0, 10);
@@ -52,21 +53,21 @@ async function upsertTimesheetRows(rows) {
 
   const numstr = (v) => {
     const n = Number(v);
-    return Number.isFinite(n) ? n.toFixed(2) : '0.00';
+    return Number.isFinite(n) ? n.toFixed(2) : "0.00";
   };
 
   const keyOf = (r) =>
     [
-      String(r.employee_id ?? '').trim(),
-      String(r.project_code ?? '').trim(),
-      String(r.projectcategory_code ?? '').trim(),
+      String(r.employee_id ?? "").trim(),
+      String(r.project_code ?? "").trim(),
+      String(r.projectcategory_code ?? "").trim(),
       dstr(r.from_date),
       dstr(r.to_date),
       numstr(r.number_of_hours),
-    ].join('|');
+    ].join("|");
 
   const projectCodes = [...new Set(valid.map((r) => r.project_code))];
-  const placeholders = projectCodes.map(() => '?').join(',');
+  const placeholders = projectCodes.map(() => "?").join(",");
 
   const [existingRows] = await pool.query(
     `SELECT employee_id, project_code, projectcategory_code,
@@ -74,7 +75,7 @@ async function upsertTimesheetRows(rows) {
             approval_status, approved_by, submitted_on, approved_on, remarks
        FROM hrms_timesheet
       WHERE project_code IN (${placeholders})`,
-    projectCodes
+    projectCodes,
   );
 
   const existingMap = new Map();
@@ -91,22 +92,37 @@ async function upsertTimesheetRows(rows) {
       continue;
     }
     const changed =
-      (prev.approval_status ?? '') !== (r.approval_status ?? '') ||
-      (prev.approved_by ?? '')     !== (r.approved_by ?? '') ||
-      dstr(prev.submitted_on)      !== dstr(r.submitted_on) ||
-      dstr(prev.approved_on)       !== dstr(r.approved_on) ||
-      (prev.remarks ?? '')         !== (r.remarks ?? '');
+      (prev.approval_status ?? "") !== (r.approval_status ?? "") ||
+      (prev.approved_by ?? "") !== (r.approved_by ?? "") ||
+      dstr(prev.submitted_on) !== dstr(r.submitted_on) ||
+      dstr(prev.approved_on) !== dstr(r.approved_on) ||
+      (prev.remarks ?? "") !== (r.remarks ?? "");
 
     if (changed) updated++;
     else unchanged++;
   }
 
   const values = valid.map((r) => [
-    r.employee_id, r.employee_name, r.designation, r.department, r.employee_email,
-    r.employee_phone, r.reporting_manager, r.employment_type,
-    r.project_code, r.project_name, r.projectcategory_code, r.projectcategory_name,
-    r.from_date, r.to_date, r.number_of_hours,
-    r.approval_status, r.approved_by, r.submitted_on, r.approved_on, r.remarks,
+    r.employee_id,
+    r.employee_name,
+    r.designation,
+    r.department,
+    r.employee_email,
+    r.employee_phone,
+    r.reporting_manager,
+    r.employment_type,
+    r.project_code,
+    r.project_name,
+    r.projectcategory_code,
+    r.projectcategory_name,
+    r.from_date,
+    r.to_date,
+    r.number_of_hours,
+    r.approval_status,
+    r.approved_by,
+    r.submitted_on,
+    r.approved_on,
+    r.remarks,
   ]);
 
   const sql = `
@@ -139,16 +155,18 @@ async function runHrmsSync(projectCodes = null) {
 
   if (!Array.isArray(codes) || codes.length === 0) {
     const rows = await query(
-      `SELECT project_code FROM hrms_project_codes WHERE is_active = 1 ORDER BY id`
+      `SELECT project_code FROM hrms_project_codes WHERE is_active = 1 ORDER BY id`,
     );
     codes = rows.map((r) => r.project_code);
   }
 
   if (!codes.length) {
-    throw new Error('No project codes found in hrms_project_codes and none provided');
+    throw new Error(
+      "No project codes found in hrms_project_codes and none provided",
+    );
   }
 
-  console.log(`📥 HRMS sync: ${codes.length} project code(s)`);
+  // console.log(`📥 HRMS sync: ${codes.length} project code(s)`);
 
   const results = await runWithConcurrency(codes, 3, async (code) => {
     try {
@@ -157,9 +175,9 @@ async function runHrmsSync(projectCodes = null) {
       const rows = normalizeHrmsTimesheet(raw);
       const stats = await upsertTimesheetRows(rows);
 
-      console.log(
-        `✅ ${code}: fetched ${rows.length} | inserted ${stats.inserted} | updated ${stats.updated} | unchanged ${stats.unchanged}`
-      );
+      // console.log(
+      //   `✅ ${code}: fetched ${rows.length} | inserted ${stats.inserted} | updated ${stats.updated} | unchanged ${stats.unchanged}`
+      // );
       return { project_code: code, fetched: rows.length, ...stats };
     } catch (err) {
       console.error(`❌ ${code}: ${err.message}`);
@@ -188,7 +206,7 @@ async function runHrmsSync(projectCodes = null) {
       total_updated: 0,
       total_skipped: 0,
       total_unchanged: 0,
-    }
+    },
   );
 
   return { projects_processed: codes.length, summary, results };
