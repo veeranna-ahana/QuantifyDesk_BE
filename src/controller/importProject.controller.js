@@ -1,6 +1,10 @@
-const { query, quantifyPool } = require("../config/db");
+const { query, quantifyPool, ahanaPilotQuery } = require("../config/db");
 const { getUatToken } = require("../../helpers/pmsTokenStore");
-const { pmsGet, extractProjects } = require("../../helpers/pmsHelper");
+const {
+  pmsGet,
+  extractProjects,
+  normalizePMSError,
+} = require("../../helpers/pmsHelper");
 const {
   PROJECT_TYPES,
   DEFAULT_PROJECT_TYPE,
@@ -9,6 +13,10 @@ const { HRS_PER_DAY } = require("../constants/effort");
 const {
   fetchCategoryTimesheetsGroupedByEmployee,
 } = require("./projectTimesheet.controller");
+const {
+  getActiveEmployeesFromHRMS,
+  getEmployeeNameMapFromHRMS,
+} = require("./hrms.controller");
 
 // ============================================================================
 // Import Project — Step 1 (Project Info)
@@ -26,18 +34,22 @@ const {
 // pmsHelper.js's own comments for why.
 // ============================================================================
 
-// Normalizes whatever PMS sends in a task's `status` field into one of our
-// three buckets. PMS status strings can vary in casing/wording, so this is
-// intentionally loose (contains-check) rather than an exact match.
+// Maps PMS's own task status values straight to our three buckets. Confirmed against a real
+// getProjectDetails response — PMS only ever sends exactly "COMPLETED", "STARTED", or
+// "YET_TO_START" for a task's `status` (never the word "progress" or "done" anywhere), so the
+// previous loose `.includes("progress")` check never matched "STARTED" and silently miscounted
+// every in-progress task as "Not Started". This now matches PMS's real values exactly.
 function normalizeTaskStatus(rawStatus) {
-  const status = String(rawStatus || "").toLowerCase();
+  const status = String(rawStatus || "").toUpperCase();
 
-  if (status.includes("progress")) {
-    return "in_progress";
-  }
-  if (status.includes("complete") || status.includes("done")) {
+  if (status === "COMPLETED") {
     return "completed";
   }
+  if (status === "STARTED") {
+    return "in_progress";
+  }
+  // Covers "YET_TO_START" and anything else PMS might send that isn't one of the two above —
+  // never fabricated as completed/in-progress, just bucketed as not started.
   return "not_started";
 }
 
@@ -149,6 +161,138 @@ function computeEffortHours(effortDays, bufferDays) {
     totalHours: round2(effortHours + bufferHours),
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Mirrors role/task_type/unit into PMS's own DB (ahana_pilot.milestone_tasks), keyed by
+// task_id (PMS's own task id — the same value we store as task_info.task_id / send as
+// pms_task_id). This is a SEPARATE database/server from quantify, so it can't join the
+// quantify transaction — it's written best-effort right after the quantify commit succeeds.
+// A failure here does NOT fail the request (our own DB already has the authoritative data),
+// but every failure is collected and returned to the caller as `pms_sync_warnings`, never
+// silently swallowed — same "never hide a failure behind an empty/default value" rule as the
+// Daily Report fetchError flag.
+// ─────────────────────────────────────────────────────────────────────────
+async function syncTasksToAhanaPilot(tasks) {
+  const warnings = [];
+
+  for (const task of tasks) {
+    const { pms_task_id, role, task_type, unit } = task;
+    if (!pms_task_id) continue;
+
+    try {
+      const result = await ahanaPilotQuery(
+        `UPDATE milestone_tasks
+            SET role = ?, task_type = ?, unit = ?
+          WHERE task_id = ?`,
+        [role || null, task_type || null, unit || null, pms_task_id],
+      );
+      if (!result || result.affectedRows === 0) {
+        warnings.push(
+          `PMS task_id ${pms_task_id}: no matching row in ahana_pilot.milestone_tasks — role/task_type/unit not mirrored to PMS.`,
+        );
+      }
+    } catch (err) {
+      console.error(
+        `Error mirroring task ${pms_task_id} to ahana_pilot.milestone_tasks:`,
+        err.message,
+      );
+      warnings.push(
+        `PMS task_id ${pms_task_id}: failed to update ahana_pilot.milestone_tasks (${err.message}).`,
+      );
+    }
+  }
+
+  return warnings;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// GET /api/import-project/pms-project-titles
+//
+// Step 1's PMS ID text input is replaced by a searchable dropdown of PMS
+// project TITLES, not raw project IDs — because PMS creates a brand-new
+// project_id for every new VERSION of the same project (e.g. 1101 →
+// 1106 when a new version is approved), flipping the old id's status to
+// INACTIVE. A title survives across versions; a numeric id doesn't. This
+// returns every distinct project_title from PMS's getAllProjects, regardless
+// of that title's current version's status (unresolvable/non-APPROVED
+// titles are still shown here — the existing APPROVED-only gate in
+// syncPmsProject below is what actually blocks syncing one of those).
+// ─────────────────────────────────────────────────────────────────────────
+const getPmsProjectTitles = async (req, res) => {
+  try {
+    const empId = req.user?.emp_id;
+    const uatToken = getUatToken(empId);
+    if (!uatToken) {
+      return res.status(401).json({
+        message:
+          "PMS session not found or expired. Please log in again to refresh your PMS access.",
+      });
+    }
+
+    const raw = await pmsGet(uatToken, "/api/pms/getAllProjects");
+    const projects = extractProjects(raw);
+
+    // Dedup by title — the same title legitimately appears once per PMS version
+    // (old + new project_id), and only the title itself is shown here.
+    const titles = [
+      ...new Set(projects.map((p) => p.project_title).filter(Boolean)),
+    ].sort((a, b) => a.localeCompare(b));
+
+    return res.status(200).json({ titles });
+  } catch (err) {
+    console.error("Error fetching PMS project titles:", err.message);
+    const { status, body } = normalizePMSError(err);
+    return res.status(status).json(body);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// GET /api/import-project/pms-project-id-by-title?project_title=X
+//
+// Resolves a chosen title to PMS's CURRENT (latest-version) project_id, via
+// PMS's own /api/pms/getProjectIdByTitle. This is the id Step 1 then syncs
+// with (syncPmsProject below) and the one that ultimately gets stored in
+// project_info.project_id and used everywhere downstream.
+// ─────────────────────────────────────────────────────────────────────────
+const getPmsProjectIdByTitle = async (req, res) => {
+  try {
+    const { project_title } = req.query;
+    if (!project_title) {
+      return res.status(400).json({ message: "project_title is required" });
+    }
+
+    const empId = req.user?.emp_id;
+    const uatToken = getUatToken(empId);
+    if (!uatToken) {
+      return res.status(401).json({
+        message:
+          "PMS session not found or expired. Please log in again to refresh your PMS access.",
+      });
+    }
+
+    const raw = await pmsGet(uatToken, "/api/pms/getProjectIdByTitle", {
+      project_title,
+    });
+    const projects = extractProjects(raw);
+    const match = projects[0];
+
+    if (!match?.project_id) {
+      return res.status(404).json({
+        message: `No PMS project found for title "${project_title}".`,
+      });
+    }
+
+    return res.status(200).json({
+      project_id: match.project_id,
+      project_title: match.project_title || project_title,
+      status: match.status || null,
+    });
+  } catch (err) {
+    console.error("Error resolving PMS project id by title:", err.message);
+    const { status, body } = normalizePMSError(err);
+    return res.status(status).json(body);
+  }
+};
 
 // ─────────────────────────────────────────────────────────────────────────
 // GET /api/import-project/pms-sync?projectId=X
@@ -327,20 +471,15 @@ const getTaskCatalogByRole = async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────
 // GET /api/import-project/employees
 // Effort Estimate (Step 3)'s "+ Add Member" picker — active employees from
-// the master DB's emp table, not something we own or duplicate locally.
-// Only emp_id + emp_name are returned; effort_estimate stores emp_id only
-// and this name is re-joined live at read time (getProjectView), same
-// principle as PMS-owned data never being persisted here.
+// HRMS (the same source the Timesheet Data tab uses — see hrms.controller.js), not the master
+// DB's emp table — per request, this list must reflect HRMS's active-employee roster rather than
+// master.emp. Only emp_id + emp_name are returned; effort_estimate stores emp_id only and this
+// name is re-joined live at read time (getProjectView), same principle as PMS-owned data never
+// being persisted here.
 // ─────────────────────────────────────────────────────────────────────────
 const getActiveEmployees = async (req, res, next) => {
   try {
-    const employees = await query(
-      `SELECT emp_id, emp_name
-         FROM master.emp
-        WHERE flag = 'Active'
-        ORDER BY emp_name ASC`,
-    );
-
+    const employees = await getActiveEmployeesFromHRMS();
     return res.status(200).json({ employees });
   } catch (err) {
     return next(err);
@@ -365,14 +504,11 @@ const getCurrentUser = async (req, res, next) => {
       return res.status(401).json({ message: "No emp_id on token" });
     }
 
-    const rows = await query(
-      `SELECT emp_id, emp_name FROM master.emp WHERE emp_id = ? LIMIT 1`,
-      [empId],
-    );
+    const empNameMap = await getEmployeeNameMapFromHRMS();
 
     return res
       .status(200)
-      .json({ emp_id: empId, emp_name: rows[0]?.emp_name || null });
+      .json({ emp_id: empId, emp_name: empNameMap.get(String(empId)) || null });
   } catch (err) {
     return next(err);
   }
@@ -436,6 +572,7 @@ const getDocumentMaster = async (req, res, next) => {
 const createProjectInfo = async (req, res, next) => {
   const {
     pms_project_id,
+    pms_project_title,
     project_info = {},
     tasks = [],
     effort_estimates = [],
@@ -461,10 +598,11 @@ const createProjectInfo = async (req, res, next) => {
     // read live from PMS's projectDetails at read-time instead.
     const [projectResult] = await connection.execute(
       `INSERT INTO project_info
-         (project_id, project_type, nbd_id, o2d_id, project_code, sub_category)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+         (project_id, project_title, project_type, nbd_id, o2d_id, project_code, sub_category)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         pms_project_id,
+        pms_project_title || null,
         project_type || null,
         nbd_id || null,
         o2d_id || null,
@@ -525,9 +663,9 @@ const createProjectInfo = async (req, res, next) => {
           projectInfoId,
           emp_id,
           role,
-          effort_days || null,
+          effort_days ?? null,
           effortHours,
-          buffer_days || null,
+          buffer_days ?? null,
           bufferHours,
           totalHours,
         ],
@@ -565,10 +703,16 @@ const createProjectInfo = async (req, res, next) => {
 
     await connection.commit();
 
+    // Mirror role/task_type/unit into PMS's own DB — best-effort, after our own commit has
+    // already succeeded (see syncTasksToAhanaPilot's comment for why this can't be part of
+    // the same transaction).
+    const pmsSyncWarnings = await syncTasksToAhanaPilot(tasks);
+
     return res.status(201).json({
       message: "Project imported successfully",
       project_info_id: projectInfoId,
       pms_project_id,
+      ...(pmsSyncWarnings.length ? { pms_sync_warnings: pmsSyncWarnings } : {}),
     });
   } catch (err) {
     if (connection) {
@@ -620,7 +764,7 @@ const createProjectInfo = async (req, res, next) => {
 const getImportedProjects = async (req, res, next) => {
   try {
     const localRows = await query(
-      `SELECT project_info_id, project_id, project_type, nbd_id, o2d_id,
+      `SELECT project_info_id, project_id, project_title, project_type, nbd_id, o2d_id,
               project_code, sub_category, created_at
          FROM project_info
         ORDER BY project_info_id DESC`,
@@ -661,8 +805,13 @@ const getImportedProjects = async (req, res, next) => {
       return {
         project_info_id: row.project_info_id,
         project_id: row.project_id,
-        // ── PMS-owned (live, never persisted by us) ──────────────────
-        project_title: pmsProject?.project_title || pmsProject?.title || null,
+        // ── PMS-owned (live, falls back to the title stored at import time if the live PMS
+        // call failed above, or this row's project_id has since gone INACTIVE) ─────────────
+        project_title:
+          pmsProject?.project_title ||
+          pmsProject?.title ||
+          row.project_title ||
+          null,
         customer_name: pmsProject?.customer_name || null,
         status: pmsProject?.status || null,
         planned_start_date: pmsProject?.planned_start_date || null,
@@ -723,7 +872,7 @@ const getProjectView = async (req, res, next) => {
     const { projectInfoId } = req.params;
 
     const projectRows = await query(
-      `SELECT project_info_id, project_id, project_type, nbd_id, o2d_id,
+      `SELECT project_info_id, project_id, project_title, project_type, nbd_id, o2d_id,
               project_code, sub_category, created_at
          FROM project_info
         WHERE project_info_id = ?`,
@@ -770,8 +919,15 @@ const getProjectView = async (req, res, next) => {
       project_info_id: project.project_info_id,
       // ── PMS-owned (live, never persisted by us) ──────────────────────
       pms_id: project.project_id,
+      // Prefers the LIVE PMS title, falling back to the title we stored at import time when the
+      // live getProjectDetails call fails or the stored project_id has since gone INACTIVE
+      // (a new PMS version minting a new project_id) — never fabricated, just the best real
+      // value we have between the two sources.
       project_name:
-        projectDetails?.project_title || projectDetails?.title || null,
+        projectDetails?.project_title ||
+        projectDetails?.title ||
+        project.project_title ||
+        null,
       customer_name: projectDetails?.customer_name || null,
       presale_id:
         projectDetails?.presales_id || projectDetails?.presale_id || null,
@@ -920,17 +1076,22 @@ const getProjectView = async (req, res, next) => {
     };
 
     // ── Effort Estimate tab ─────────────────────────────────────────────
-    // emp_name is never stored on effort_estimate — joined live from master.emp by emp_id,
-    // same principle as PMS-owned data. The project-wide total (overall_total_hours) is just
-    // SUM(total_hours) computed here, not a separately stored/maintained value.
-    const effortRows = await query(
-      `SELECT ee.emp_id, e.emp_name, ee.role, ee.effort_days, ee.effort_hours,
+    // emp_name is never stored on effort_estimate — resolved live by emp_id from HRMS (not
+    // master.emp — per request, employee details here must come from HRMS only), same principle
+    // as PMS-owned data. The project-wide total (overall_total_hours) is just SUM(total_hours)
+    // computed here, not a separately stored/maintained value.
+    const empNameMap = await getEmployeeNameMapFromHRMS();
+    const effortRowsRaw = await query(
+      `SELECT ee.emp_id, ee.role, ee.effort_days, ee.effort_hours,
               ee.buffer_days, ee.buffer_hours, ee.total_hours
          FROM effort_estimate ee
-         LEFT JOIN master.emp e ON e.emp_id = ee.emp_id
         WHERE ee.project_info_id = ?`,
       [projectInfoId],
     );
+    const effortRows = effortRowsRaw.map((r) => ({
+      ...r,
+      emp_name: empNameMap.get(String(r.emp_id)) || null,
+    }));
 
     const effort_estimates = {
       members: effortRows,
@@ -1043,7 +1204,6 @@ const getProjectView = async (req, res, next) => {
       // person's full logged total is shown against each of their role rows (same caveat as
       // tasks/units above, which are also joined by role rather than a per-row assignment).
       const loggedHours = loggedHoursByEmpId.get(String(row.emp_id)) || 0;
-      const hasLoggedData = loggedHoursByEmpId.has(String(row.emp_id));
       return {
         emp_id: row.emp_id,
         emp_name: row.emp_name,
@@ -1054,25 +1214,30 @@ const getProjectView = async (req, res, next) => {
         pending: s.pending,
         alloc_hours: allocHours,
         // Progress here is task-completion progress (completed/tasks), which is real, live PMS
-        // task-status data — it doesn't need HRMS at all.
+        // task-status data — it doesn't need HRMS at all. 0 tasks tagged to this role yet (e.g. a
+        // member added to Effort Estimate manually, with no matching Task Info rows) shows as a
+        // real 0% bar rather than `—`, same as a row with tasks that just haven't been started.
         progress_percent:
-          s.tasks > 0 ? Math.round((s.done / s.tasks) * 100) : null,
+          s.tasks > 0 ? Math.round((s.done / s.tasks) * 100) : 0,
         logged_hours: loggedHours,
-        // Only computed once there's an actual HRMS row for this employee — otherwise left null
-        // (renders as `—`) rather than a misleading "-32h" variance against zero logged hours.
-        variance_hours: hasLoggedData
-          ? Math.round((loggedHours - allocHours) * 100) / 100
-          : null,
+        // 0 logged hours against a real allocation IS under-utilization, not "unknown" — so this
+        // no longer gates on hasLoggedData (no HRMS row at all defaults loggedHours to 0 via
+        // loggedHoursByEmpId.get(...) || 0 above, same as an HRMS row that explicitly says 0).
+        // The only case left as null (renders `—`) is nothing allocated to compare against.
+        variance_hours:
+          allocHours > 0
+            ? Math.round((loggedHours - allocHours) * 100) / 100
+            : null,
         // Confirmed rule: Logged > Allocated by more than 1h = Over Utilized, Logged < Allocated
-        // by more than 1h = Under Utilized, within ±1h = Optimally Used. Only computed once
-        // there's an actual HRMS row for this employee — otherwise left null (renders `—`).
-        status: hasLoggedData
-          ? loggedHours - allocHours > 1
-            ? "Over Utilized"
-            : allocHours - loggedHours > 1
-              ? "Under Utilized"
-              : "Optimally Used"
-          : null,
+        // by more than 1h = Under Utilized, within ±1h = Optimally Used.
+        status:
+          allocHours > 0
+            ? loggedHours - allocHours > 1
+              ? "Over Utilized"
+              : allocHours - loggedHours > 1
+                ? "Under Utilized"
+                : "Optimally Used"
+            : null,
       };
     });
 
@@ -1110,16 +1275,15 @@ const getProjectView = async (req, res, next) => {
     // LEFT JOIN so every one of the 16 document_master rows shows up even
     // when nothing has been linked yet for this project ("Pending").
     // uploaded_by is stored as an emp_id (whoever was logged in when the link was added,
-    // from req.user.emp_id) — never a name — and resolved live via master.emp here, same
-    // principle as effort_estimate's emp_name.
+    // from req.user.emp_id) — never a name — and resolved live from HRMS (empNameMap, fetched
+    // once above), not master.emp, same principle as effort_estimate's emp_name.
     const documents = await query(
       `SELECT dm.document_id, dm.document_name,
               dc.sharepoint_url, dc.status, dc.uploaded_by AS uploaded_by_emp_id,
-              e.emp_name AS uploaded_by_name, dc.uploaded_date
+              dc.uploaded_date
          FROM document_master dm
          LEFT JOIN document_checklist dc
            ON dc.document_id = dm.document_id AND dc.project_info_id = ?
-         LEFT JOIN master.emp e ON e.emp_id = dc.uploaded_by
         ORDER BY dm.document_id ASC`,
       [projectInfoId],
     );
@@ -1129,9 +1293,8 @@ const getProjectView = async (req, res, next) => {
     // walks document_master's fixed list. Fetch those separately and append them.
     const customDocuments = await query(
       `SELECT dc.custom_document_name, dc.sharepoint_url, dc.status,
-              dc.uploaded_by AS uploaded_by_emp_id, e.emp_name AS uploaded_by_name, dc.uploaded_date
+              dc.uploaded_by AS uploaded_by_emp_id, dc.uploaded_date
          FROM document_checklist dc
-         LEFT JOIN master.emp e ON e.emp_id = dc.uploaded_by
         WHERE dc.project_info_id = ? AND dc.document_id IS NULL
         ORDER BY dc.uploaded_date ASC`,
       [projectInfoId],
@@ -1143,7 +1306,7 @@ const getProjectView = async (req, res, next) => {
         document_name: doc.document_name,
         sharepoint_url: doc.sharepoint_url || null,
         status: doc.status || "Pending",
-        uploaded_by: doc.uploaded_by_name || null,
+        uploaded_by: empNameMap.get(String(doc.uploaded_by_emp_id)) || null,
         uploaded_date: doc.uploaded_date || null,
       })),
       ...customDocuments.map((doc) => ({
@@ -1151,7 +1314,7 @@ const getProjectView = async (req, res, next) => {
         document_name: doc.custom_document_name,
         sharepoint_url: doc.sharepoint_url || null,
         status: doc.status || "Uploaded",
-        uploaded_by: doc.uploaded_by_name || null,
+        uploaded_by: empNameMap.get(String(doc.uploaded_by_emp_id)) || null,
         uploaded_date: doc.uploaded_date || null,
       })),
     ];
@@ -1287,9 +1450,11 @@ const updateProjectInfo = async (req, res, next) => {
           projectInfoId,
           emp_id,
           role,
-          effort_days || null,
+          // Same `?? null` fix as Create Project — 0 is a legitimate effort/buffer day count,
+          // not a missing value, and `||` was silently nulling it out (violating NOT NULL).
+          effort_days ?? null,
           effortHours,
-          buffer_days || null,
+          buffer_days ?? null,
           bufferHours,
           totalHours,
         ],
@@ -1331,9 +1496,14 @@ const updateProjectInfo = async (req, res, next) => {
 
     await connection.commit();
 
+    // Same best-effort mirror as Create Project — covers both single-task edit (tasks.length
+    // === 1) and bulk edit (tasks.length > 1), since both go through this one endpoint/loop.
+    const pmsSyncWarnings = await syncTasksToAhanaPilot(tasks);
+
     return res.status(200).json({
       message: "Project updated successfully",
       project_info_id: Number(projectInfoId),
+      ...(pmsSyncWarnings.length ? { pms_sync_warnings: pmsSyncWarnings } : {}),
     });
   } catch (err) {
     if (connection) {
@@ -1365,6 +1535,8 @@ const updateProjectInfo = async (req, res, next) => {
 };
 
 module.exports = {
+  getPmsProjectTitles,
+  getPmsProjectIdByTitle,
   syncPmsProject,
   getRoles,
   getTaskCatalogByRole,

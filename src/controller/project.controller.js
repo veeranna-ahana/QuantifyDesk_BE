@@ -1,11 +1,11 @@
-const { query, projectCodeQuery } = require('../config/db');
-const axios = require('axios');
+const { query, projectCodeQuery } = require("../config/db");
+const axios = require("axios");
 
 // ============================================
 // CONFIGURATION
 // ============================================
 const PMS_CONFIG = {
-  baseUrl: 'http://172.16.20.61:5001',
+  baseUrl: "http://172.16.20.61:5001",
   timeout: 10000,
 };
 
@@ -14,21 +14,20 @@ const PMS_CONFIG = {
 // ============================================
 function getPMSHeaders(req) {
   const headers = {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
+    "Content-Type": "application/json",
+    Accept: "application/json",
   };
-  
+
   // Forward the authorization token from the incoming request
   const authHeader = req.headers.authorization;
   if (authHeader) {
-    headers['Authorization'] = authHeader;
+    headers["Authorization"] = authHeader;
   } else {
-    console.warn('⚠️ No authorization header found in request');
+    console.warn("⚠️ No authorization header found in request");
   }
-  
+
   return headers;
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/projects
@@ -37,9 +36,9 @@ function getPMSHeaders(req) {
 // ─────────────────────────────────────────────────────────────────────────────
 const createProject = async (req, res, next) => {
   try {
-    console.log('📥 Creating new project...');
-    console.log('📋 Request Body:', req.body);
-    
+    // console.log('📥 Creating new project...');
+    // console.log('📋 Request Body:', req.body);
+
     const {
       name,
       clientName,
@@ -58,13 +57,13 @@ const createProject = async (req, res, next) => {
 
     if (!name || !clientName) {
       return res.status(400).json({
-        message: 'Project name and client name are required',
+        message: "Project name and client name are required",
       });
     }
 
     if (startDate && endDate && new Date(endDate) < new Date(startDate)) {
       return res.status(400).json({
-        message: 'End date cannot be earlier than start date',
+        message: "End date cannot be earlier than start date",
       });
     }
 
@@ -74,8 +73,8 @@ const createProject = async (req, res, next) => {
 
     // Check project_name
     const nameCheck = await query(
-      'SELECT id, project_name FROM projects WHERE project_name = ?',
-      [name]
+      "SELECT id, project_name FROM projects WHERE project_name = ?",
+      [name],
     );
     if (nameCheck.length > 0) {
       duplicateErrors.push(`Project name "${name}" is already in use`);
@@ -87,8 +86,8 @@ const createProject = async (req, res, next) => {
 
     if (nbdId) {
       const nbdCheck = await query(
-        'SELECT id, nbd_id FROM projects WHERE nbd_id = ?',
-        [nbdId]
+        "SELECT id, nbd_id FROM projects WHERE nbd_id = ?",
+        [nbdId],
       );
       if (nbdCheck.length > 0) {
         duplicateErrors.push(`NBD ID "${nbdId}" is already in use`);
@@ -101,8 +100,8 @@ const createProject = async (req, res, next) => {
 
     if (projectCode) {
       const codeCheck = await query(
-        'SELECT id, project_code FROM projects WHERE project_code = ?',
-        [projectCode]
+        "SELECT id, project_code FROM projects WHERE project_code = ?",
+        [projectCode],
       );
       if (codeCheck.length > 0) {
         duplicateErrors.push(`Project code "${projectCode}" is already in use`);
@@ -115,11 +114,13 @@ const createProject = async (req, res, next) => {
 
     if (pmsProjectId) {
       const pmsCheck = await query(
-        'SELECT id, pms_project_id FROM projects WHERE pms_project_id = ?',
-        [pmsProjectId]
+        "SELECT id, pms_project_id FROM projects WHERE pms_project_id = ?",
+        [pmsProjectId],
       );
       if (pmsCheck.length > 0) {
-        duplicateErrors.push(`PMS Project ID "${pmsProjectId}" is already in use`);
+        duplicateErrors.push(
+          `PMS Project ID "${pmsProjectId}" is already in use`,
+        );
         duplicateDetails.push({
           id: pmsCheck[0].id,
           pms_project_id: pmsCheck[0].pms_project_id,
@@ -129,7 +130,7 @@ const createProject = async (req, res, next) => {
 
     if (duplicateErrors.length > 0) {
       return res.status(409).json({
-        message: 'Duplicate entry found',
+        message: "Duplicate entry found",
         errors: duplicateErrors,
         details: duplicateDetails,
       });
@@ -154,7 +155,7 @@ const createProject = async (req, res, next) => {
       subCategory || null,
       startDate || null,
       endDate || null,
-      status || 'New',
+      status || "New",
       projectType || null,
       teamLead || null,
       pmsProjectId || null,
@@ -167,15 +168,17 @@ const createProject = async (req, res, next) => {
               project_code, sub_category, start_date, end_date, status, 
               project_type, team_lead, pms_project_id
        FROM projects WHERE id = ?`,
-      [result.insertId]
+      [result.insertId],
     );
 
     return res.status(201).json(rows[0]);
   } catch (err) {
-    if (err.code === 'ER_DUP_ENTRY') {
+    if (err.code === "ER_DUP_ENTRY") {
       return res.status(409).json({
-        message: 'Duplicate entry found',
-        errors: ['A project with this name, NBD ID, PMS Project ID, or project code already exists'],
+        message: "Duplicate entry found",
+        errors: [
+          "A project with this name, NBD ID, PMS Project ID, or project code already exists",
+        ],
         details: [],
       });
     }
@@ -254,19 +257,25 @@ const getEffortEstimate = async (req, res, next) => {
        FROM effort_estimates
        WHERE project_id = ?
        ORDER BY id ASC`,
-      [projectId]
+      [projectId],
     );
 
     // Also return totals for convenience
     const totals = rows.reduce(
       (acc, r) => ({
         effort_days: acc.effort_days + Number(r.effort_days),
-        effort_hrs:  acc.effort_hrs  + Number(r.effort_hrs),
+        effort_hrs: acc.effort_hrs + Number(r.effort_hrs),
         buffer_days: acc.buffer_days + Number(r.buffer_days),
-        buffer_hrs:  acc.buffer_hrs  + Number(r.buffer_hrs),
-        total_hrs:   acc.total_hrs   + Number(r.total_hrs),
+        buffer_hrs: acc.buffer_hrs + Number(r.buffer_hrs),
+        total_hrs: acc.total_hrs + Number(r.total_hrs),
       }),
-      { effort_days: 0, effort_hrs: 0, buffer_days: 0, buffer_hrs: 0, total_hrs: 0 }
+      {
+        effort_days: 0,
+        effort_hrs: 0,
+        buffer_days: 0,
+        buffer_hrs: 0,
+        total_hrs: 0,
+      },
     );
 
     return res.status(200).json({ rows, totals });
@@ -285,10 +294,12 @@ const getEffortEstimate = async (req, res, next) => {
 const upsertEffortEstimate = async (req, res, next) => {
   try {
     const { projectId } = req.params;
-    const { rows }      = req.body;
+    const { rows } = req.body;
 
     if (!projectId || !Array.isArray(rows) || rows.length === 0) {
-      return res.status(400).json({ message: 'projectId and rows[] are required' });
+      return res
+        .status(400)
+        .json({ message: "projectId and rows[] are required" });
     }
 
     // ── Check if any active task assignments exist for this project ───────
@@ -300,7 +311,7 @@ const upsertEffortEstimate = async (req, res, next) => {
        FROM assignments a
        LEFT JOIN master.emp e ON a.emp_id = e.emp_id
        WHERE a.project_id = ?`,
-      [projectId]
+      [projectId],
     );
 
     if (existingAssignments.length > 0) {
@@ -314,22 +325,37 @@ const upsertEffortEstimate = async (req, res, next) => {
 
       const blockedRoles = [];
       for (const [role, assignedList] of Object.entries(assignmentsByRole)) {
-        const incomingRow = rows.find(r => r.role === role);
-        const effortDays = incomingRow ? (parseFloat(incomingRow.effort_days) || 0) : 0;
-        const bufferDays = incomingRow ? (parseFloat(incomingRow.buffer_days) || 0) : 0;
-        const units = incomingRow ? (parseInt(incomingRow.units, 10) || 0) : 0;
+        const incomingRow = rows.find((r) => r.role === role);
+        const effortDays = incomingRow
+          ? parseFloat(incomingRow.effort_days) || 0
+          : 0;
+        const bufferDays = incomingRow
+          ? parseFloat(incomingRow.buffer_days) || 0
+          : 0;
+        const units = incomingRow ? parseInt(incomingRow.units, 10) || 0 : 0;
 
-        const totalAssignedUnits = assignedList.reduce((s, a) => s + (Number(a.units_assigned) || 0), 0);
-        const totalAssignedDays = assignedList.reduce((s, a) => s + (Number(a.estimated_days) || 0), 0);
-        const totalAssignedHours = assignedList.reduce((s, a) => s + (Number(a.estimated_hours) || 0), 0);
+        const totalAssignedUnits = assignedList.reduce(
+          (s, a) => s + (Number(a.units_assigned) || 0),
+          0,
+        );
+        const totalAssignedDays = assignedList.reduce(
+          (s, a) => s + (Number(a.estimated_days) || 0),
+          0,
+        );
+        const totalAssignedHours = assignedList.reduce(
+          (s, a) => s + (Number(a.estimated_hours) || 0),
+          0,
+        );
 
         const isRemoved = effortDays <= 0 || units <= 0;
-        const isUnderAssigned = units < totalAssignedUnits || (effortDays + bufferDays) < totalAssignedDays;
+        const isUnderAssigned =
+          units < totalAssignedUnits ||
+          effortDays + bufferDays < totalAssignedDays;
 
         if (isRemoved || isUnderAssigned) {
           blockedRoles.push({
             role,
-            reason: isRemoved ? 'removed' : 'under_assigned',
+            reason: isRemoved ? "removed" : "under_assigned",
             assignedCount: assignedList.length,
             totalAssignedUnits,
             totalAssignedDays,
@@ -337,7 +363,7 @@ const upsertEffortEstimate = async (req, res, next) => {
             newUnits: units,
             newDays: effortDays,
             newBufferDays: bufferDays,
-            assignments: assignedList.map(a => ({
+            assignments: assignedList.map((a) => ({
               id: a.id,
               task_name: a.task_name,
               emp_id: a.emp_id,
@@ -351,7 +377,7 @@ const upsertEffortEstimate = async (req, res, next) => {
       }
 
       if (blockedRoles.length > 0) {
-        const roleNames = blockedRoles.map(b => `"${b.role}"`).join(', ');
+        const roleNames = blockedRoles.map((b) => `"${b.role}"`).join(", ");
         return res.status(400).json({
           message: `Cannot remove or reduce effort for ${roleNames} because active task assignments exist in Task Allocation. Please remove or update assignments first.`,
           blockedRoles,
@@ -364,9 +390,9 @@ const upsertEffortEstimate = async (req, res, next) => {
     for (const r of rows) {
       const effortDays = parseFloat(r.effort_days) || 0;
       const bufferDays = parseFloat(r.buffer_days) || 0;
-      const effortHrs  = effortDays * HOURS_PER_DAY;
-      const bufferHrs  = bufferDays * HOURS_PER_DAY;
-      const totalHrs   = effortHrs + bufferHrs;
+      const effortHrs = effortDays * HOURS_PER_DAY;
+      const bufferHrs = bufferDays * HOURS_PER_DAY;
+      const totalHrs = effortHrs + bufferHrs;
 
       await query(
         `INSERT INTO effort_estimates
@@ -390,9 +416,14 @@ const upsertEffortEstimate = async (req, res, next) => {
           bufferDays,
           bufferHrs,
           totalHrs,
-          (r.units !== undefined && r.units !== null && r.units !== '' && !isNaN(parseInt(r.units, 10))) ? parseInt(r.units, 10) : null,
+          r.units !== undefined &&
+          r.units !== null &&
+          r.units !== "" &&
+          !isNaN(parseInt(r.units, 10))
+            ? parseInt(r.units, 10)
+            : null,
           r.unit_label || null,
-        ]
+        ],
       );
     }
 
@@ -401,21 +432,27 @@ const upsertEffortEstimate = async (req, res, next) => {
       `SELECT id, project_id, role, effort_days, effort_hrs,
               buffer_days, buffer_hrs, total_hrs, units, unit_label
        FROM effort_estimates WHERE project_id = ? ORDER BY id ASC`,
-      [projectId]
+      [projectId],
     );
 
     const totals = saved.reduce(
       (acc, r) => ({
         effort_days: acc.effort_days + Number(r.effort_days),
-        effort_hrs:  acc.effort_hrs  + Number(r.effort_hrs),
+        effort_hrs: acc.effort_hrs + Number(r.effort_hrs),
         buffer_days: acc.buffer_days + Number(r.buffer_days),
-        buffer_hrs:  acc.buffer_hrs  + Number(r.buffer_hrs),
-        total_hrs:   acc.total_hrs   + Number(r.total_hrs),
+        buffer_hrs: acc.buffer_hrs + Number(r.buffer_hrs),
+        total_hrs: acc.total_hrs + Number(r.total_hrs),
       }),
-      { effort_days: 0, effort_hrs: 0, buffer_days: 0, buffer_hrs: 0, total_hrs: 0 }
+      {
+        effort_days: 0,
+        effort_hrs: 0,
+        buffer_days: 0,
+        buffer_hrs: 0,
+        total_hrs: 0,
+      },
     );
 
-    return res.status(200).json({ message: 'Saved', rows: saved, totals });
+    return res.status(200).json({ message: "Saved", rows: saved, totals });
   } catch (err) {
     return next(err);
   }
@@ -434,18 +471,21 @@ const deleteEffortEstimate = async (req, res, next) => {
        FROM assignments a
        LEFT JOIN master.emp e ON a.emp_id = e.emp_id
        WHERE a.project_id = ?`,
-      [projectId]
+      [projectId],
     );
 
     if (existingAssignments.length > 0) {
       return res.status(400).json({
-        message: 'Cannot clear effort estimates because active task assignments exist for this project. Please remove assignments in Task Allocation first.',
+        message:
+          "Cannot clear effort estimates because active task assignments exist for this project. Please remove assignments in Task Allocation first.",
         assignedCount: existingAssignments.length,
       });
     }
 
-    await query('DELETE FROM effort_estimates WHERE project_id = ?', [projectId]);
-    return res.status(200).json({ message: 'Effort estimate cleared' });
+    await query("DELETE FROM effort_estimates WHERE project_id = ?", [
+      projectId,
+    ]);
+    return res.status(200).json({ message: "Effort estimate cleared" });
   } catch (err) {
     return next(err);
   }
@@ -476,31 +516,47 @@ const updateProject = async (req, res, next) => {
     } = req.body;
 
     // Check if project exists
-    const projectExists = await query('SELECT id FROM projects WHERE id = ?', [id]);
+    const projectExists = await query("SELECT id FROM projects WHERE id = ?", [
+      id,
+    ]);
     if (!projectExists.length) {
-      return res.status(404).json({ message: 'Project not found' });
+      return res.status(404).json({ message: "Project not found" });
     }
 
-    const current = (await query('SELECT * FROM projects WHERE id = ?', [id]))[0];
+    const current = (
+      await query("SELECT * FROM projects WHERE id = ?", [id])
+    )[0];
 
     // Prepare updated values
     const updatedName = name !== undefined ? name : current.project_name;
-    const updatedClientName = clientName !== undefined ? clientName : current.client_name;
-    const updatedDescription = description !== undefined ? description : current.description;
+    const updatedClientName =
+      clientName !== undefined ? clientName : current.client_name;
+    const updatedDescription =
+      description !== undefined ? description : current.description;
     const updatedNbdId = nbdId !== undefined ? nbdId : current.nbd_id;
     const updatedO2dId = o2dId !== undefined ? o2dId : current.o2d_id;
-    const updatedProjectCode = projectCode !== undefined ? projectCode : current.project_code;
-    const updatedSubCategory = subCategory !== undefined ? subCategory : current.sub_category;
-    const updatedStartDate = startDate !== undefined ? startDate : current.start_date;
+    const updatedProjectCode =
+      projectCode !== undefined ? projectCode : current.project_code;
+    const updatedSubCategory =
+      subCategory !== undefined ? subCategory : current.sub_category;
+    const updatedStartDate =
+      startDate !== undefined ? startDate : current.start_date;
     const updatedEndDate = endDate !== undefined ? endDate : current.end_date;
     const updatedStatus = status !== undefined ? status : current.status;
-    const updatedProjectType = projectType !== undefined ? projectType : current.project_type;
-    const updatedTeamLead = teamLead !== undefined ? teamLead : current.team_lead;
-    const updatedCreateCr = createCr !== undefined ? createCr : current.create_cr;
+    const updatedProjectType =
+      projectType !== undefined ? projectType : current.project_type;
+    const updatedTeamLead =
+      teamLead !== undefined ? teamLead : current.team_lead;
+    const updatedCreateCr =
+      createCr !== undefined ? createCr : current.create_cr;
 
-    if (updatedStartDate && updatedEndDate && new Date(updatedEndDate) < new Date(updatedStartDate)) {
+    if (
+      updatedStartDate &&
+      updatedEndDate &&
+      new Date(updatedEndDate) < new Date(updatedStartDate)
+    ) {
       return res.status(400).json({
-        message: 'End date cannot be earlier than start date',
+        message: "End date cannot be earlier than start date",
       });
     }
 
@@ -512,11 +568,13 @@ const updateProject = async (req, res, next) => {
     // Check sub_category
     if (updatedSubCategory && updatedSubCategory !== current.sub_category) {
       const subCategoryCheck = await query(
-        'SELECT id, sub_category FROM projects WHERE sub_category = ? AND id != ?',
-        [updatedSubCategory, id]
+        "SELECT id, sub_category FROM projects WHERE sub_category = ? AND id != ?",
+        [updatedSubCategory, id],
       );
       if (subCategoryCheck.length > 0) {
-        duplicateErrors.push(`Sub Category "${updatedSubCategory}" is already in use`);
+        duplicateErrors.push(
+          `Sub Category "${updatedSubCategory}" is already in use`,
+        );
         duplicateDetails.push({
           id: subCategoryCheck[0].id,
           sub_category: subCategoryCheck[0].sub_category,
@@ -527,8 +585,8 @@ const updateProject = async (req, res, next) => {
     // Check project_name
     if (updatedName && updatedName !== current.project_name) {
       const nameCheck = await query(
-        'SELECT id, project_name FROM projects WHERE project_name = ? AND id != ?',
-        [updatedName, id]
+        "SELECT id, project_name FROM projects WHERE project_name = ? AND id != ?",
+        [updatedName, id],
       );
       if (nameCheck.length > 0) {
         duplicateErrors.push(`Project name "${updatedName}" is already in use`);
@@ -542,8 +600,8 @@ const updateProject = async (req, res, next) => {
     // Check nbd_id
     if (updatedNbdId && updatedNbdId !== current.nbd_id) {
       const nbdCheck = await query(
-        'SELECT id, nbd_id FROM projects WHERE nbd_id = ? AND id != ?',
-        [updatedNbdId, id]
+        "SELECT id, nbd_id FROM projects WHERE nbd_id = ? AND id != ?",
+        [updatedNbdId, id],
       );
       if (nbdCheck.length > 0) {
         duplicateErrors.push(`NBD ID "${updatedNbdId}" is already in use`);
@@ -572,7 +630,7 @@ const updateProject = async (req, res, next) => {
     // If any duplicates found, return error
     if (duplicateErrors.length > 0) {
       return res.status(409).json({
-        message: 'Duplicate entry found',
+        message: "Duplicate entry found",
         errors: duplicateErrors,
         details: duplicateDetails,
       });
@@ -620,16 +678,16 @@ const updateProject = async (req, res, next) => {
               project_code, sub_category, start_date, end_date, status, 
               project_type, team_lead, create_cr
        FROM projects WHERE id = ?`,
-      [id]
+      [id],
     );
 
     return res.status(200).json(updatedRows[0]);
   } catch (err) {
     // Handle any unexpected MySQL errors
-    if (err.code === 'ER_DUP_ENTRY') {
+    if (err.code === "ER_DUP_ENTRY") {
       return res.status(409).json({
-        message: 'Duplicate entry found',
-        errors: ['A project with this name or NBD ID already exists'],
+        message: "Duplicate entry found",
+        errors: ["A project with this name or NBD ID already exists"],
         details: [],
       });
     }
@@ -687,16 +745,14 @@ const getCustomers = async (req, res, next) => {
         const rows = await runQuery();
         allCustomers.push(...rows);
       } catch (err) {
-        console.log("Skipping table:", err.message);
+        // console.log("Skipping table:", err.message);
       }
     }
 
     // Remove duplicates, nulls, empty values, and sort
     const uniqueCustomers = [
       ...new Set(
-        allCustomers
-          .map((row) => row.customer_name?.trim())
-          .filter(Boolean)
+        allCustomers.map((row) => row.customer_name?.trim()).filter(Boolean),
       ),
     ].sort((a, b) => a.localeCompare(b));
 
@@ -718,17 +774,17 @@ const getCustomers = async (req, res, next) => {
 // ============================================
 const fetchPMSProjects = async (req, res, next) => {
   try {
-    console.log('📥 Fetching PMS projects for dropdown...');
-    console.log('📋 Using Authorization:', req.headers.authorization ? '✅ Present' : '❌ Missing');
-    
+    // console.log('📥 Fetching PMS projects for dropdown...');
+    // console.log('📋 Using Authorization:', req.headers.authorization ? '✅ Present' : '❌ Missing');
+
     const response = await axios.get(
       `${PMS_CONFIG.baseUrl}/api/pms/getAllProjects`,
       {
         headers: getPMSHeaders(req),
-        timeout: PMS_CONFIG.timeout
-      }
+        timeout: PMS_CONFIG.timeout,
+      },
     );
-    
+
     let projects = [];
     if (Array.isArray(response.data)) {
       projects = response.data;
@@ -740,17 +796,17 @@ const fetchPMSProjects = async (req, res, next) => {
       return res.status(200).json([]);
     }
 
-    const formattedProjects = projects.map(project => ({
+    const formattedProjects = projects.map((project) => ({
       pms_project_id: project.project_id || project.id,
-      title: project.project_title || project.title || project.name || '',
+      title: project.project_title || project.title || project.name || "",
     }));
-    
+
     return res.status(200).json(formattedProjects);
   } catch (err) {
-    console.error('❌ Error fetching PMS projects:', err.message);
+    console.error("❌ Error fetching PMS projects:", err.message);
     return res.status(500).json({
-      message: 'Failed to fetch PMS projects',
-      error: err.message
+      message: "Failed to fetch PMS projects",
+      error: err.message,
     });
   }
 };
@@ -758,46 +814,46 @@ const fetchPMSProjects = async (req, res, next) => {
 const fetchPMSProjectDetails = async (req, res, next) => {
   try {
     const { projectId } = req.query;
-    
+
     if (!projectId) {
       return res.status(400).json({
-        message: 'Project ID is required'
+        message: "Project ID is required",
       });
     }
 
     // First, check if the project exists in your DB
     const localProject = await query(
-      'SELECT id, project_name, pms_project_id FROM projects WHERE pms_project_id = ?',
-      [projectId]
+      "SELECT id, project_name, pms_project_id FROM projects WHERE pms_project_id = ?",
+      [projectId],
     );
 
     if (localProject.length === 0) {
       return res.status(404).json({
-        message: 'Project not found in quantify tool'
+        message: "Project not found in quantify tool",
       });
     }
 
     // ✅ FIX: Forward the authorization token to PMS
     const authHeader = req.headers.authorization;
     const headers = {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json'
+      "Content-Type": "application/json",
+      Accept: "application/json",
     };
-    
+
     if (authHeader) {
-      headers['Authorization'] = authHeader;
-      console.log('✅ Forwarding authorization token to PMS');
+      headers["Authorization"] = authHeader;
+      // console.log('✅ Forwarding authorization token to PMS');
     } else {
-      console.warn('⚠️ No authorization header found in request');
+      console.warn("⚠️ No authorization header found in request");
     }
 
     // Fetch from PMS with token
     const response = await axios.get(
       `http://172.16.20.61:5001/api/pms/getProjectDetails?projectId=${projectId}`,
-      { 
+      {
         headers: headers,
-        timeout: 10000 
-      }
+        timeout: 10000,
+      },
     );
 
     if (response.data) {
@@ -806,35 +862,36 @@ const fetchPMSProjectDetails = async (req, res, next) => {
         project_id: localProject[0].id,
         project_name: localProject[0].project_name,
         pms_project_id: projectId,
-        milestones: response.data.milestoneDetails || response.data.milestones || [],
-        tasks: response.data.tasksDetails || response.data.tasks || []
+        milestones:
+          response.data.milestoneDetails || response.data.milestones || [],
+        tasks: response.data.tasksDetails || response.data.tasks || [],
       };
 
       return res.status(200).json(projectDetails);
     } else {
       return res.status(404).json({
-        message: 'Project details not found in PMS'
+        message: "Project details not found in PMS",
       });
     }
   } catch (err) {
-    console.error('Error fetching PMS project details:', err.message);
-    
+    console.error("Error fetching PMS project details:", err.message);
+
     // Better error handling
     if (err.response) {
-      console.error('PMS API Response Status:', err.response.status);
-      console.error('PMS API Response Data:', err.response.data);
-      
+      console.error("PMS API Response Status:", err.response.status);
+      console.error("PMS API Response Data:", err.response.data);
+
       if (err.response.status === 401) {
         return res.status(401).json({
-          message: 'Authentication failed with PMS API',
-          error: 'Invalid or expired token'
+          message: "Authentication failed with PMS API",
+          error: "Invalid or expired token",
         });
       }
     }
-    
+
     return res.status(500).json({
-      message: 'Failed to fetch project details from PMS',
-      error: err.message
+      message: "Failed to fetch project details from PMS",
+      error: err.message,
     });
   }
 };

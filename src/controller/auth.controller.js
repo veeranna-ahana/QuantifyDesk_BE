@@ -19,12 +19,12 @@ const login = async (req, res) => {
   const { email, password, emp_id } = req.body;
   const authToken = req.headers.authorization?.replace("Bearer ", "");
 
-  console.log("Login endpoint called with:", {
-    email,
-    password: password ? "***" : "none",
-    emp_id,
-    authToken: authToken ? "present" : "missing",
-  });
+  // console.log("Login endpoint called with:", {
+  //   email,
+  //   password: password ? "***" : "none",
+  //   emp_id,
+  //   authToken: authToken ? "present" : "missing",
+  // });
 
   try {
     // Require either password OR authToken
@@ -111,10 +111,10 @@ const login = async (req, res) => {
           ? { Authorization: `Bearer ${authToken}` }
           : {};
 
-        console.log("🔑 RBAC Request Headers:", {
-          hasToken: !!authToken,
-          tokenPrefix: authToken ? authToken.substring(0, 20) + "..." : "none",
-        });
+        // console.log("🔑 RBAC Request Headers:", {
+        //   hasToken: !!authToken,
+        //   tokenPrefix: authToken ? authToken.substring(0, 20) + "..." : "none",
+        // });
 
         const instance = axios.create({
           baseURL,
@@ -129,20 +129,20 @@ const login = async (req, res) => {
             "/employee_role_associate/get-current-employees-role-details",
           );
           rbacData = rbacResponse.data;
-          console.log("🔐 Fetched RBAC data successfully");
+          // console.log("🔐 Fetched RBAC data successfully");
         } catch (rbacError) {
           console.warn("⚠️ RBAC fetch failed (attempt 1):", rbacError.message);
 
           // Fallback: Try with emp_id parameter
           if (emp_id) {
             try {
-              console.log("📍 Trying RBAC with emp_id parameter:", emp_id);
+              // console.log("📍 Trying RBAC with emp_id parameter:", emp_id);
               const fallbackResponse = await instance.get(
                 "/employee_role_associate/get-current-employees-role-details",
                 { params: { employee_id: emp_id } },
               );
               rbacData = fallbackResponse.data;
-              console.log("✅ Fetched RBAC data via emp_id fallback");
+              // console.log("✅ Fetched RBAC data via emp_id fallback");
             } catch (fallbackError) {
               console.warn(
                 "⚠️ RBAC fallback also failed:",
@@ -161,7 +161,7 @@ const login = async (req, res) => {
               "/department_admin/get-departments",
             );
             departments = deptListResponse.data?.departments || [];
-            console.log("📦 Fetched departments:", departments);
+            // console.log("📦 Fetched departments:", departments);
             // console.log("📦 Fetched departments:", departments.length);
           } catch (deptError) {
             console.warn("⚠️ Department fetch failed:", deptError.message);
@@ -186,16 +186,16 @@ const login = async (req, res) => {
           deptEmployeeResponses.forEach((res, index) => {
             if (res.status === "fulfilled" && res.value?.data) {
               const employees = res.value.data?.data || [];
-              console.log(
-                "Current Department:",
-                departments[index].department_name,
-              );
+              // console.log(
+              //   "Current Department:",
+              //   departments[index].department_name,
+              // );
               // New code for CR
               if (departments[index].department_name === "Service Delivery") {
-                console.log(
-                  "Service Delivery Employees:",
-                  employees.map((emp) => emp.emp_name),
-                );
+                // console.log(
+                //   "Service Delivery Employees:",
+                //   employees.map((emp) => emp.emp_name),
+                // );
 
                 serviceDeliveryEmployees = employees;
               }
@@ -205,11 +205,11 @@ const login = async (req, res) => {
                 department_name: departments[index].department_name,
                 employees,
               });
-              console.log(
-                `Department ${departments[index].department_name} (${departments[index].department_id}) has ${employees.length} employees`,
-              );
+              // console.log(
+              //   `Department ${departments[index].department_name} (${departments[index].department_id}) has ${employees.length} employees`,
+              // );
 
-              console.log("Employee List:", employees);
+              // console.log("Employee List:", employees);
               const match = employees.find(
                 (emp) => emp.employee_id === user.emp_id,
               );
@@ -226,16 +226,16 @@ const login = async (req, res) => {
           });
 
           // console.log("All Department Employees:", allDepartmentEmployees);
-          console.log(
-            "All Department Employees:",
-            JSON.stringify(allDepartmentEmployees, null, 2),
-          );
+          // console.log(
+          //   "All Department Employees:",
+          //   JSON.stringify(allDepartmentEmployees, null, 2),
+          // );
 
           // Remove duplicate departments
           departmentData = Array.from(
             new Map(departmentData.map((d) => [d.department_id, d])).values(),
           );
-          console.log("🏢 Processed departments:", departmentData.length);
+          // console.log("🏢 Processed departments:", departmentData.length);
         }
       } catch (err) {
         console.error("❌ RBC/RBAC fetch error:", err.message);
@@ -300,12 +300,12 @@ const login = async (req, res) => {
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
-    console.log(
-      "✅ Login successful for:",
-      user.emp_email,
-      "| Emp ID:",
-      empIdForLookup,
-    );
+    // console.log(
+    //   "✅ Login successful for:",
+    //   user.emp_email,
+    //   "| Emp ID:",
+    //   empIdForLookup,
+    // );
 
     return res.status(200).json({
       status: "success",
@@ -313,8 +313,8 @@ const login = async (req, res) => {
       message: "Login successful",
       userid: loginResult.userid,
       // id: localUserId, // ❌ Removed - no users table dependency
-      accessToken,                   // ✅ Quantify JWT — for Quantify's own APIs
-      portalAccessToken: authToken,  // ✅ Main myahana portal token — for PMS API calls
+      accessToken, // ✅ Quantify JWT — for Quantify's own APIs
+      portalAccessToken: authToken, // ✅ Main myahana portal token — for PMS API calls
       result: loginResult.result,
       source: loginResult.source,
       departments: departmentData,
@@ -335,12 +335,12 @@ const processUserLoginWithRBAC = (userRecord, rbacData, departmentData) => {
   const emp_id = userRecord.emp_id;
   const userid = `${userRecord.u_id}_${emp_id}`;
 
-  console.log("🎯 Processing login with RBAC data:", {
-    emp_id,
-    rbacDataType: typeof rbacData,
-    rbacDataIsArray: Array.isArray(rbacData),
-    rbacDataKeys: rbacData ? Object.keys(rbacData).slice(0, 5) : "null",
-  });
+  // console.log("🎯 Processing login with RBAC data:", {
+  //   emp_id,
+  //   rbacDataType: typeof rbacData,
+  //   rbacDataIsArray: Array.isArray(rbacData),
+  //   rbacDataKeys: rbacData ? Object.keys(rbacData).slice(0, 5) : "null",
+  // });
 
   const rbacArray = Array.isArray(rbacData)
     ? rbacData
@@ -353,30 +353,30 @@ const processUserLoginWithRBAC = (userRecord, rbacData, departmentData) => {
   const appName = process.env.RBAC_APPLICATION_NAME || "QuantifyTool";
 
   // Log all fetched roles for debugging
-  console.log("📊 RBAC Data Fetched:", {
-    totalRoles: rbacArray.length,
-    appNameLooking: appName,
-    allApplications: rbacArray
-      .map((r) => r.application_name)
-      .filter((v, i, a) => a.indexOf(v) === i),
-  });
+  // console.log("📊 RBAC Data Fetched:", {
+  //   totalRoles: rbacArray.length,
+  //   appNameLooking: appName,
+  //   allApplications: rbacArray
+  //     .map((r) => r.application_name)
+  //     .filter((v, i, a) => a.indexOf(v) === i),
+  // });
 
   if (rbacArray.length > 0) {
-    console.log(
-      "📋 Sample roles from RBAC:",
-      rbacArray.slice(0, 3).map((r) => ({
-        role_name: r.role_name,
-        application_name: r.application_name,
-        is_active: r.is_active,
-      })),
-    );
+    // console.log(
+    //   "📋 Sample roles from RBAC:",
+    //   rbacArray.slice(0, 3).map((r) => ({
+    //     role_name: r.role_name,
+    //     application_name: r.application_name,
+    //     is_active: r.is_active,
+    //   })),
+    // );
   }
 
   const roles = rbacArray.filter(
     (role) => role.application_name === appName && role.is_active === true,
   );
 
-  console.log("✔️ Filtered roles for", appName + ":", roles.length);
+  // console.log("✔️ Filtered roles for", appName + ":", roles.length);
 
   const departments = (departmentData || []).map((dept) => ({
     employee_id: dept.employee_id,
@@ -392,9 +392,9 @@ const processUserLoginWithRBAC = (userRecord, rbacData, departmentData) => {
         role.role_name.charAt(0).toUpperCase() +
         role.role_name.slice(1).toLowerCase();
 
-      console.log(
-        `✅ USER: ${userRecord.emp_name} → ROLE: "${normalizedRole}" (from RBAC: "${role.role_name}")`,
-      );
+      // console.log(
+      //   `✅ USER: ${userRecord.emp_name} → ROLE: "${normalizedRole}" (from RBAC: "${role.role_name}")`,
+      // );
 
       return {
         emp_id,

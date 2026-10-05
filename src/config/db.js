@@ -1,5 +1,5 @@
-const mysql = require('mysql2/promise');
-require('dotenv').config();
+const mysql = require("mysql2/promise");
+require("dotenv").config();
 
 // Quantify DB connection pool (main application DB)
 const quantifyPool = mysql.createPool({
@@ -11,7 +11,7 @@ const quantifyPool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-   dateStrings: true,
+  dateStrings: true,
 });
 
 // Master DB connection pool (for employee data)
@@ -19,12 +19,12 @@ const masterPool = mysql.createPool({
   host: process.env.MASTER_DB_HOST || process.env.DB_HOST,
   user: process.env.MASTER_DB_USER || process.env.DB_USER,
   password: process.env.MASTER_DB_PASSWORD || process.env.DB_PASSWORD,
-  database: process.env.MASTER_DB_NAME || 'master',
+  database: process.env.MASTER_DB_NAME || "master",
   port: process.env.MASTER_DB_PORT ? Number(process.env.MASTER_DB_PORT) : 3306,
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-   dateStrings: true,
+  dateStrings: true,
 });
 
 // Project Code DB connection pool (for customer names dropdown)
@@ -33,7 +33,9 @@ const projectCodePool = mysql.createPool({
   user: process.env.PROJECT_CODE_DB_USER || process.env.DB_USER,
   password: process.env.PROJECT_CODE_DB_PASSWORD || process.env.DB_PASSWORD,
   database: process.env.PROJECT_CODE_DB_NAME || process.env.DB_NAME,
-  port: process.env.PROJECT_CODE_DB_PORT ? Number(process.env.PROJECT_CODE_DB_PORT) : 3306,
+  port: process.env.PROJECT_CODE_DB_PORT
+    ? Number(process.env.PROJECT_CODE_DB_PORT)
+    : 3306,
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
@@ -82,11 +84,40 @@ const projectCodeQuery = async (sql, params = []) => {
   }
 };
 
+// Ahana Pilot DB connection pool (PMS's own database — writes role/task_type/unit back into
+// PMS's milestone_tasks table whenever we set them on our side, so PMS reflects the same values).
+const ahanaPilotPool = mysql.createPool({
+  host: process.env.AHANA_PILOT_DB_HOST || process.env.DB_HOST,
+  user: process.env.AHANA_PILOT_DB_USER || process.env.DB_USER,
+  password: process.env.AHANA_PILOT_DB_PASSWORD || process.env.DB_PASSWORD,
+  database: process.env.AHANA_PILOT_DB_NAME || "ahana_pilot",
+  port: process.env.AHANA_PILOT_DB_PORT
+    ? Number(process.env.AHANA_PILOT_DB_PORT)
+    : 3306,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  dateStrings: true,
+});
+
+/**
+ * Helper to run parameterized queries on the Ahana Pilot (PMS) DB.
+ * @param {string} sql - SQL query string with placeholders.
+ * @param {Array} [params] - Values for the placeholders.
+ * @returns {Promise<any[]>} - Result rows.
+ */
+const ahanaPilotQuery = async (sql, params = []) => {
+  const [rows] = await ahanaPilotPool.execute(sql, params);
+  return rows;
+};
+
 module.exports = {
   quantifyPool,
   masterPool,
   projectCodePool,
+  ahanaPilotPool,
   query,
   masterQuery,
   projectCodeQuery,
+  ahanaPilotQuery,
 };
