@@ -373,7 +373,6 @@ const getAllEmployeesUtilization = async (req, res) => {
          pi.project_id                                    AS pms_project_id,
          pi.project_code                                  AS project_code,
          pi.sub_category                                  AS project_category_code,
-         pi.description                                   AS description,
          COALESCE(ta.assigned_task_count, 0)              AS assigned_task_count,
          COALESCE(ta.assigned_units,      0)              AS assigned_units,
          COALESCE(ef.assigned_days,       0)              AS assigned_days,
@@ -454,7 +453,6 @@ const getAllEmployeesUtilization = async (req, res) => {
         pms_project_id: r.pms_project_id,
         project_code: r.project_code,
         project_category_code: r.project_category_code,
-        description: r.description,
         // Kept for any existing caller still reading a single `role` string (first role, same
         // as the old behavior's intent) — `roles` below is the real, complete list.
         role: mergedRoles[0] || null,
@@ -571,7 +569,6 @@ const getEmployeeUtilization = async (req, res) => {
          pi.project_id            AS pms_project_id,
          pi.project_code,
          pi.sub_category,
-         pi.description,
          COALESCE(t.assigned_task_count, 0) AS assigned_task_count,
          COALESCE(t.assigned_units,      0) AS assigned_units,
          COALESCE(e.assigned_days,       0) AS assigned_days,
@@ -674,7 +671,6 @@ const getEmployeeUtilization = async (req, res) => {
           pms_project_id: p.pms_project_id,
           project_code: p.project_code,
           project_category_code: p.sub_category,
-          description: p.description,
           // Kept for any existing caller still reading a single `role` string — `roles` below is
           // the real, complete list.
           role: mergedRoles[0] || null,
