@@ -6,6 +6,7 @@ const {
   extractProjectDetails,
   normalizePMSError,
 } = require("../../helpers/pmsHelper");
+const { getEmployeeNameMapFromHRMS } = require("./hrms.controller");
 
 const HOURS_PER_DAY = 8; // adjust if the org uses a different value
 
@@ -26,18 +27,20 @@ const HOURS_PER_DAY = 8; // adjust if the org uses a different value
 // The auth pattern is unchanged: getUatToken(emp_id) from pmsTokenStore.js.
 // ============================================================================
 
-// Normalizes whatever PMS sends in a task's `status` field. Same loose
-// contains-match convention as importProject.controller.js's
-// normalizeTaskStatus — duplicated here (not imported) so this file has no
-// dependency on the wizard controller and can evolve independently.
+// Maps PMS's own task status values straight to our three buckets. PMS only ever sends exactly
+// "COMPLETED", "STARTED", or "YET_TO_START" for a task's `status` (confirmed against a real
+// getProjectDetails response) — a previous loose `.includes("progress")` check here never
+// matched "STARTED" and silently miscounted every in-progress task as "Not Started". Duplicated
+// here (not imported from importProject.controller.js, which has the same fix) so this file has
+// no dependency on the wizard controller and can evolve independently.
 function normalizeTaskStatus(rawStatus) {
-  const status = String(rawStatus || "").toLowerCase();
+  const status = String(rawStatus || "").toUpperCase();
 
-  if (status.includes("progress")) {
-    return "in_progress";
-  }
-  if (status.includes("complete") || status.includes("done")) {
+  if (status === "COMPLETED") {
     return "completed";
+  }
+  if (status === "STARTED") {
+    return "in_progress";
   }
   return "not_started";
 }
@@ -339,19 +342,20 @@ const getAllEmployeesUtilization = async (req, res) => {
     const filterEmpId = req.query.emp_id || null;
 
     const employees = await query(
-      `SELECT
-         a.emp_id,
-         e.emp_name
+      `SELECT a.emp_id
        FROM (
          SELECT DISTINCT emp_id FROM task_info WHERE emp_id IS NOT NULL
          UNION
          SELECT emp_id FROM effort_estimate WHERE emp_id IS NOT NULL
        ) AS a
-       LEFT JOIN master.emp e ON e.emp_id = a.emp_id
        ${filterEmpId ? "WHERE a.emp_id = ?" : ""}
        ORDER BY a.emp_id`,
       filterEmpId ? [filterEmpId] : [],
     );
+    // Names resolved from HRMS, not master.emp — per request, employee details here must come
+    // from HRMS only. Covers every status (not just Active), so someone who's since gone
+    // inactive still shows their real name instead of falling back to a raw emp_id.
+    const empNameMap = await getEmployeeNameMapFromHRMS();
 
     if (employees.length === 0) {
       return res
@@ -374,9 +378,13 @@ const getAllEmployeesUtilization = async (req, res) => {
          COALESCE(ta.assigned_units,      0)              AS assigned_units,
          COALESCE(ef.assigned_days,       0)              AS assigned_days,
          COALESCE(hr.logged_hours,        0)              AS logged_hours,
-         -- Role: prefer the role a real task was tagged with (task_info.role); fall back to the
-         -- role they were estimated under (effort_estimate.role) when no task is tagged yet.
-         COALESCE(ta.role, ef.role)                       AS role
+         -- Role: an employee can be tagged under MORE THAN ONE role on the same project (e.g.
+         -- both "BE Dev" and "FE Dev" across different tasks/effort rows) — every distinct role
+         -- from BOTH task_info and effort_estimate is collected here (comma-separated), not just
+         -- one. Previously this used MAX(role), which silently kept only one role per project and
+         -- dropped the rest. Merged into a de-duplicated list in JS below.
+         ta.role                                           AS task_roles,
+         ef.role                                           AS effort_roles
        FROM (
          SELECT emp_id, project_info_id FROM task_info
          UNION
@@ -387,14 +395,14 @@ const getAllEmployeesUtilization = async (req, res) => {
          SELECT emp_id, project_info_id,
                 COUNT(DISTINCT task_id) AS assigned_task_count,
                 SUM(unit)               AS assigned_units,
-                MAX(role)               AS role
+                GROUP_CONCAT(DISTINCT role ORDER BY role SEPARATOR ',') AS role
            FROM task_info
           GROUP BY emp_id, project_info_id
        ) ta ON ta.emp_id = ti.emp_id AND ta.project_info_id = ti.project_info_id
        LEFT JOIN (
          SELECT emp_id, project_info_id,
                 SUM(effort_days + buffer_days) AS assigned_days,
-                MAX(role)                      AS role
+                GROUP_CONCAT(DISTINCT role ORDER BY role SEPARATOR ',') AS role
            FROM effort_estimate
           GROUP BY emp_id, project_info_id
        ) ef ON ef.emp_id = ti.emp_id AND ef.project_info_id = ti.project_info_id
@@ -409,14 +417,13 @@ const getAllEmployeesUtilization = async (req, res) => {
       empIds,
     );
 
-    const nameMap = new Map(employees.map((e) => [e.emp_id, e.emp_name]));
     const byEmployee = new Map();
 
     for (const r of rows) {
       if (!byEmployee.has(r.emp_id)) {
         byEmployee.set(r.emp_id, {
           emp_id: r.emp_id,
-          emp_name: nameMap.get(r.emp_id) || null,
+          emp_name: empNameMap.get(String(r.emp_id)) || null,
           total_projects: 0,
           total_assigned_days: 0,
           total_assigned_hours: 0,
@@ -430,13 +437,28 @@ const getAllEmployeesUtilization = async (req, res) => {
       const assignedHours = assignedDays * HOURS_PER_DAY;
       const loggedHours = Number(r.logged_hours) || 0;
 
+      // Merge task_info's roles and effort_estimate's roles into one de-duplicated list — an
+      // employee can genuinely be "BE Dev" AND "FE Dev" on the same project.
+      const mergedRoles = [
+        ...new Set(
+          [r.task_roles, r.effort_roles]
+            .filter(Boolean)
+            .flatMap((s) => s.split(","))
+            .map((s) => s.trim())
+            .filter(Boolean),
+        ),
+      ];
+
       emp.projects.push({
         project_info_id: r.project_info_id,
         pms_project_id: r.pms_project_id,
         project_code: r.project_code,
         project_category_code: r.project_category_code,
         description: r.description,
-        role: r.role || null,
+        // Kept for any existing caller still reading a single `role` string (first role, same
+        // as the old behavior's intent) — `roles` below is the real, complete list.
+        role: mergedRoles[0] || null,
+        roles: mergedRoles,
         assigned_task_count: Number(r.assigned_task_count) || 0,
         assigned_units: Number(r.assigned_units) || 0,
         assigned_days: assignedDays,
@@ -501,13 +523,11 @@ const getAllEmployeesUtilization = async (req, res) => {
       total_logged_hours: Math.round(e.total_logged_hours * 100) / 100,
     }));
 
-    return res
-      .status(200)
-      .json({
-        success: true,
-        total_employees: employees_out.length,
-        employees: employees_out,
-      });
+    return res.status(200).json({
+      success: true,
+      total_employees: employees_out.length,
+      employees: employees_out,
+    });
   } catch (err) {
     console.error("❌ getAllEmployeesUtilization error:", err.message);
     const { status, body } = normalizePMSError(err);
@@ -556,16 +576,19 @@ const getEmployeeUtilization = async (req, res) => {
          COALESCE(t.assigned_units,      0) AS assigned_units,
          COALESCE(e.assigned_days,       0) AS assigned_days,
          COALESCE(h.logged_hours,        0) AS logged_hours,
-         -- Role: prefer the role a real task was tagged with (task_info.role); fall back to the
-         -- role they were estimated under (effort_estimate.role) when no task is tagged yet —
-         -- same "estimated before tasked" edge case as the Total Hours Allocated question.
-         COALESCE(t.role, e.role) AS role
+         -- Role: an employee can genuinely be tagged under MORE THAN ONE role on the same
+         -- project (e.g. both "BE Dev" and "FE Dev") — every distinct role from BOTH task_info
+         -- and effort_estimate is collected here (comma-separated), not collapsed to one via
+         -- MAX(role) like before (which silently dropped every role but the alphabetically last).
+         -- Merged into a de-duplicated list in JS below.
+         t.role AS task_roles,
+         e.role AS effort_roles
        FROM project_info pi
        LEFT JOIN (
          SELECT project_info_id,
                 COUNT(DISTINCT task_id) AS assigned_task_count,
                 SUM(unit)               AS assigned_units,
-                MAX(role)               AS role
+                GROUP_CONCAT(DISTINCT role ORDER BY role SEPARATOR ',') AS role
            FROM task_info
           WHERE emp_id = ?
           GROUP BY project_info_id
@@ -573,7 +596,7 @@ const getEmployeeUtilization = async (req, res) => {
        LEFT JOIN (
          SELECT project_info_id,
                 SUM(effort_days + buffer_days) AS assigned_days,
-                MAX(role)                      AS role
+                GROUP_CONCAT(DISTINCT role ORDER BY role SEPARATOR ',') AS role
            FROM effort_estimate
           WHERE emp_id = ?
           GROUP BY project_info_id
@@ -634,13 +657,28 @@ const getEmployeeUtilization = async (req, res) => {
           .filter(Boolean)
           .sort();
 
+        // Merge task_info's roles and effort_estimate's roles into one de-duplicated list — see
+        // the SQL comment above for why this can legitimately be more than one role.
+        const mergedRoles = [
+          ...new Set(
+            [p.task_roles, p.effort_roles]
+              .filter(Boolean)
+              .flatMap((s) => s.split(","))
+              .map((s) => s.trim())
+              .filter(Boolean),
+          ),
+        ];
+
         return {
           project_info_id: p.project_info_id,
           pms_project_id: p.pms_project_id,
           project_code: p.project_code,
           project_category_code: p.sub_category,
           description: p.description,
-          role: p.role || null,
+          // Kept for any existing caller still reading a single `role` string — `roles` below is
+          // the real, complete list.
+          role: mergedRoles[0] || null,
+          roles: mergedRoles,
           assigned_task_count: Number(p.assigned_task_count) || 0,
           assigned_units: Number(p.assigned_units) || 0,
           completed_tasks: completed.length,

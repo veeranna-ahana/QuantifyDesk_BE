@@ -2,7 +2,7 @@ const swaggerJSDoc = require("swagger-jsdoc");
 const path = require("path");
 
 // Get the project root (Backend folder)
-const projectRoot = path.resolve(__dirname, '../../');
+const projectRoot = path.resolve(__dirname, "../../");
 
 const swaggerOptions = {
   definition: {
@@ -17,9 +17,9 @@ const swaggerOptions = {
         bearerAuth: {
           type: "http",
           scheme: "bearer",
-          bearerFormat: "JWT"
-        }
-      }
+          bearerFormat: "JWT",
+        },
+      },
     },
     servers: [
       {
@@ -36,5 +36,5 @@ const swaggerOptions = {
 };
 
 const swaggerSpec = swaggerJSDoc(swaggerOptions);
-console.log('✅ Swagger paths found:', Object.keys(swaggerSpec.paths || {}));
+// console.log('✅ Swagger paths found:', Object.keys(swaggerSpec.paths || {}));
 module.exports = swaggerSpec;

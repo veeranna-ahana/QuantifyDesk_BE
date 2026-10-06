@@ -27,14 +27,13 @@ const { verifyAccessToken } = require("../helpers/helperFunctions/authHelper");
 const auth = (req, res, next) => {
   const authHeader = req.headers.authorization;
 
-  if (!authHeader)
-    return res.status(401).json({ message: "Token required" });
+  if (!authHeader) return res.status(401).json({ message: "Token required" });
 
   const token = authHeader.split(" ")[1];
 
   try {
     const decoded = verifyAccessToken(token);
-    console.log("Decoded Token:", decoded);
+    // console.log("Decoded Token:", decoded);
     req.user = decoded;
     next();
   } catch (err) {

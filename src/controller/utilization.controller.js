@@ -11,11 +11,16 @@ const resolveLocalUserId = async (empId, empName, empEmail) => {
 
   // 2. Try to match by email
   if (empEmail) {
-    const rows = await query("SELECT id FROM users WHERE email = ?", [empEmail]);
+    const rows = await query("SELECT id FROM users WHERE email = ?", [
+      empEmail,
+    ]);
     if (rows.length > 0) {
       // Self-heal: update emp_id
       if (empId) {
-        await query("UPDATE users SET emp_id = ? WHERE id = ?", [empId, rows[0].id]);
+        await query("UPDATE users SET emp_id = ? WHERE id = ?", [
+          empId,
+          rows[0].id,
+        ]);
       }
       return rows[0].id;
     }
@@ -31,13 +36,16 @@ const resolveLocalUserId = async (empId, empName, empEmail) => {
         .toLowerCase();
     };
     const targetCleaned = clean(empName);
-    
+
     const allUsers = await query("SELECT id, name, email FROM users");
     for (const u of allUsers) {
       if (clean(u.name) === targetCleaned) {
         // Self-heal: update emp_id
         if (empId) {
-          await query("UPDATE users SET emp_id = ? WHERE id = ?", [empId, u.id]);
+          await query("UPDATE users SET emp_id = ? WHERE id = ?", [
+            empId,
+            u.id,
+          ]);
         }
         return u.id;
       }
@@ -63,31 +71,31 @@ const getMyAssignments = async (req, res, next) => {
     if (!userId || userId === "null" || userId === "undefined") {
       empId = req.user?.emp_id;
       if (empId) {
-        console.log(`ℹ️ Using emp_id from token: ${empId}`);
+        // console.log(`ℹ️ Using emp_id from token: ${empId}`);
       }
     } else {
       // Check if userId is an emp_id (string like "AS00717")
-      if (typeof userId === 'string' && !/^\d+$/.test(userId)) {
+      if (typeof userId === "string" && !/^\d+$/.test(userId)) {
         empId = userId;
-        console.log(`ℹ️ Using userId as emp_id: ${empId}`);
+        // console.log(`ℹ️ Using userId as emp_id: ${empId}`);
       } else {
         // userId might be u_id from master.emp, get emp_id from it
         const empResult = await masterQuery(
           `SELECT emp_id FROM emp WHERE u_id = ? AND flag = 'Active'`,
-          [userId]
+          [userId],
         );
         if (empResult && empResult.length > 0) {
           empId = empResult[0].emp_id;
-          console.log(`ℹ️ Resolved emp_id from u_id ${userId}: ${empId}`);
+          // console.log(`ℹ️ Resolved emp_id from u_id ${userId}: ${empId}`);
         } else {
           // Try as users.id (backward compatibility)
           const userResult = await query(
             `SELECT emp_id FROM users WHERE id = ?`,
-            [userId]
+            [userId],
           );
           if (userResult && userResult.length > 0) {
             empId = userResult[0].emp_id;
-            console.log(`ℹ️ Resolved emp_id from users.id ${userId}: ${empId}`);
+            // console.log(`ℹ️ Resolved emp_id from users.id ${userId}: ${empId}`);
           }
         }
       }
@@ -99,8 +107,8 @@ const getMyAssignments = async (req, res, next) => {
     }
 
     if (!empId) {
-      return res.status(400).json({ 
-        message: "Employee not found. Please login again." 
+      return res.status(400).json({
+        message: "Employee not found. Please login again.",
       });
     }
 
@@ -147,14 +155,13 @@ const getMyAssignments = async (req, res, next) => {
     `;
 
     const rows = await query(sql, [empId]);
-    console.log(`✅ Found ${rows.length} assignments for emp_id: ${empId}`);
+    // console.log(`✅ Found ${rows.length} assignments for emp_id: ${empId}`);
     return res.status(200).json(rows);
   } catch (err) {
-    console.error('❌ getMyAssignments error:', err);
+    console.error("❌ getMyAssignments error:", err);
     return next(err);
   }
 };
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EMP: Log progress on an assignment
@@ -168,10 +175,20 @@ const getMyAssignments = async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const logProgress = async (req, res, next) => {
   try {
-    let { 
-      assignment_id, user_id, date, units_completed, 
-      todays_tasks, total_time_needed, yesterdays_tasks, risks,
-      project_id, role, task_name, remarks, availability
+    let {
+      assignment_id,
+      user_id,
+      date,
+      units_completed,
+      todays_tasks,
+      total_time_needed,
+      yesterdays_tasks,
+      risks,
+      project_id,
+      role,
+      task_name,
+      remarks,
+      availability,
     } = req.body;
 
     let finalEmpId = null;
@@ -179,40 +196,51 @@ const logProgress = async (req, res, next) => {
 
     // ✅ Get emp_id from request or token
     if (user_id && user_id !== "null" && user_id !== "undefined") {
-      if (typeof user_id === 'string' && !/^\d+$/.test(user_id)) {
+      if (typeof user_id === "string" && !/^\d+$/.test(user_id)) {
         finalEmpId = user_id;
         const empResult = await masterQuery(
           `SELECT u_id, emp_id, emp_name, emp_email FROM emp WHERE emp_id = ? AND flag = 'Active'`,
-          [finalEmpId]
+          [finalEmpId],
         );
         if (empResult.length > 0) {
-          finalUserId = await resolveLocalUserId(finalEmpId, empResult[0].emp_name, empResult[0].emp_email);
+          finalUserId = await resolveLocalUserId(
+            finalEmpId,
+            empResult[0].emp_name,
+            empResult[0].emp_email,
+          );
         }
       } else {
         const empResult = await masterQuery(
           `SELECT u_id, emp_id, emp_name, emp_email FROM emp WHERE u_id = ? AND flag = 'Active'`,
-          [user_id]
+          [user_id],
         );
         if (empResult.length > 0) {
           finalEmpId = empResult[0].emp_id;
-          finalUserId = await resolveLocalUserId(finalEmpId, empResult[0].emp_name, empResult[0].emp_email);
+          finalUserId = await resolveLocalUserId(
+            finalEmpId,
+            empResult[0].emp_name,
+            empResult[0].emp_email,
+          );
         } else {
           const userResult = await query(
             `SELECT emp_id, name, email FROM users WHERE id = ?`,
-            [user_id]
+            [user_id],
           );
           if (userResult.length > 0) {
             finalEmpId = userResult[0].emp_id;
             finalUserId = user_id;
-            
+
             if (finalEmpId) {
               const empInfo = await masterQuery(
                 `SELECT emp_name, emp_email FROM emp WHERE emp_id = ? AND flag = 'Active'`,
-                [finalEmpId]
+                [finalEmpId],
               );
               if (empInfo.length > 0) {
                 // Self-heal
-                await query("UPDATE users SET emp_id = ? WHERE id = ?", [finalEmpId, finalUserId]);
+                await query("UPDATE users SET emp_id = ? WHERE id = ?", [
+                  finalEmpId,
+                  finalUserId,
+                ]);
               }
             }
           }
@@ -225,24 +253,29 @@ const logProgress = async (req, res, next) => {
       if (empId) {
         const empResult = await masterQuery(
           `SELECT u_id, emp_id, emp_name, emp_email FROM emp WHERE emp_id = ? AND flag = 'Active'`,
-          [empId]
+          [empId],
         );
         if (empResult && empResult.length > 0) {
           finalEmpId = empResult[0].emp_id;
-          finalUserId = await resolveLocalUserId(finalEmpId, empResult[0].emp_name, empResult[0].emp_email);
+          finalUserId = await resolveLocalUserId(
+            finalEmpId,
+            empResult[0].emp_name,
+            empResult[0].emp_email,
+          );
         }
       }
     }
 
     if (!finalEmpId) {
-      return res.status(400).json({ 
-        message: "Employee not found. Please ensure you're logged in." 
+      return res.status(400).json({
+        message: "Employee not found. Please ensure you're logged in.",
       });
     }
 
     if (!finalUserId) {
       return res.status(400).json({
-        message: "User account not found in main database. Please contact an admin."
+        message:
+          "User account not found in main database. Please contact an admin.",
       });
     }
 
@@ -262,7 +295,7 @@ const logProgress = async (req, res, next) => {
       // ✅ Verify the assignment belongs to this employee
       const assignmentCheck = await query(
         `SELECT emp_id, units_assigned FROM assignments WHERE id = ?`,
-        [assignment_id]
+        [assignment_id],
       );
 
       if (assignmentCheck.length === 0) {
@@ -270,8 +303,8 @@ const logProgress = async (req, res, next) => {
       }
 
       if (assignmentCheck[0].emp_id !== finalEmpId) {
-        return res.status(403).json({ 
-          message: "You are not authorized to log progress for this assignment" 
+        return res.status(403).json({
+          message: "You are not authorized to log progress for this assignment",
         });
       }
 
@@ -282,28 +315,36 @@ const logProgress = async (req, res, next) => {
         `SELECT COALESCE(SUM(units_completed), 0) AS total_completed
          FROM assignment_progress
          WHERE assignment_id = ?`,
-        [assignment_id]
+        [assignment_id],
       );
 
-      const currentCompleted = parseFloat(completedSoFar[0]?.total_completed || 0);
+      const currentCompleted = parseFloat(
+        completedSoFar[0]?.total_completed || 0,
+      );
       const newUnits = parseInt(units_completed, 10) || 0;
 
       // ✅ Check if logging would exceed assigned units
-      if (newUnits > 0 && (currentCompleted + newUnits) > totalAssigned) {
+      if (newUnits > 0 && currentCompleted + newUnits > totalAssigned) {
         return res.status(400).json({
-          message: `Cannot log ${newUnits} units. Only ${totalAssigned - currentCompleted} units remaining.`
+          message: `Cannot log ${newUnits} units. Only ${totalAssigned - currentCompleted} units remaining.`,
         });
       }
     } else {
       // For manual task, project_id, role and task_name are required
       if (!project_id) {
-        return res.status(400).json({ message: "Project is required for manual tasks" });
+        return res
+          .status(400)
+          .json({ message: "Project is required for manual tasks" });
       }
       if (!role) {
-        return res.status(400).json({ message: "Role is required for manual tasks" });
+        return res
+          .status(400)
+          .json({ message: "Role is required for manual tasks" });
       }
       if (!task_name || !task_name.trim()) {
-        return res.status(400).json({ message: "Task Name/Title is required for manual tasks" });
+        return res
+          .status(400)
+          .json({ message: "Task Name/Title is required for manual tasks" });
       }
     }
 
@@ -315,10 +356,21 @@ const logProgress = async (req, res, next) => {
          project_id, role, task_name, remarks, status, availability
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'APPROVED', ?)`,
       [
-        assignment_id || null, finalUserId, finalEmpId, date, parseInt(units_completed, 10) || 0, 
-        todays_tasks || null, total_time_needed || null, yesterdays_tasks || null, risks || null,
-        project_id || null, role || null, task_name || null, remarks || null, availability || null
-      ]
+        assignment_id || null,
+        finalUserId,
+        finalEmpId,
+        date,
+        parseInt(units_completed, 10) || 0,
+        todays_tasks || null,
+        total_time_needed || null,
+        yesterdays_tasks || null,
+        risks || null,
+        project_id || null,
+        role || null,
+        task_name || null,
+        remarks || null,
+        availability || null,
+      ],
     );
 
     // ✅ Fetch context for notification
@@ -329,43 +381,47 @@ const logProgress = async (req, res, next) => {
          LEFT JOIN projects p ON a.project_id = p.id
          LEFT JOIN master.emp e ON a.emp_id = e.emp_id
          WHERE a.id = ?`,
-        [assignment_id]
+        [assignment_id],
       );
       if (ctxRows.length > 0) {
         const ctx = ctxRows[0];
         try {
           await createNotification({
             user_id: finalUserId,
-            type: 'progress_approved',
+            type: "progress_approved",
             title: `Progress logged successfully ✓`,
             message: `You have logged ${units_completed || 0} unit(s) of "${ctx.task_name}" (${ctx.role}) on "${ctx.project_name}".`,
           });
         } catch (nErr) {
-          console.warn('⚠️ Notification failed:', nErr.message);
+          console.warn("⚠️ Notification failed:", nErr.message);
         }
       }
     } else {
-      const projRow = await query("SELECT project_name FROM projects WHERE id = ?", [project_id]);
-      const projectName = projRow.length > 0 ? projRow[0].project_name : "Unknown Project";
+      const projRow = await query(
+        "SELECT project_name FROM projects WHERE id = ?",
+        [project_id],
+      );
+      const projectName =
+        projRow.length > 0 ? projRow[0].project_name : "Unknown Project";
       try {
         await createNotification({
           user_id: finalUserId,
-          type: 'progress_approved',
+          type: "progress_approved",
           title: `Manual task added successfully ✓`,
           message: `You have added a manual task "${task_name}" for "${projectName}".`,
         });
       } catch (nErr) {
-        console.warn('⚠️ Notification failed:', nErr.message);
+        console.warn("⚠️ Notification failed:", nErr.message);
       }
     }
 
     return res.status(201).json({
       id: result.insertId,
-      status: 'APPROVED',
-      message: "Progress logged successfully!"
+      status: "APPROVED",
+      message: "Progress logged successfully!",
     });
   } catch (err) {
-    console.error('❌ logProgress error:', err);
+    console.error("❌ logProgress error:", err);
     return next(err);
   }
 };
@@ -397,7 +453,7 @@ const getPendingApprovals = async (req, res, next) => {
        LEFT JOIN master.emp e ON ap.emp_id = e.emp_id
        LEFT JOIN projects p    ON a.project_id     = p.id
        WHERE ap.status = 'PENDING'
-       ORDER BY ap.date ASC`
+       ORDER BY ap.date ASC`,
     );
     return res.status(200).json(rows);
   } catch (err) {
@@ -421,26 +477,29 @@ const approveProgress = async (req, res, next) => {
        LEFT JOIN master.emp e ON ap.emp_id = e.emp_id
        LEFT JOIN projects p    ON a.project_id     = p.id
        WHERE ap.id = ?`,
-      [progressId]
+      [progressId],
     );
 
-    if (rows.length === 0) return res.status(404).json({ message: "Progress log not found" });
+    if (rows.length === 0)
+      return res.status(404).json({ message: "Progress log not found" });
     const ap = rows[0];
 
-    if (ap.status !== 'PENDING') {
-      return res.status(400).json({ message: `Cannot approve — current status is ${ap.status}` });
+    if (ap.status !== "PENDING") {
+      return res
+        .status(400)
+        .json({ message: `Cannot approve — current status is ${ap.status}` });
     }
 
     await query(
       `UPDATE assignment_progress SET status = 'APPROVED', rejection_reason = NULL WHERE id = ?`,
-      [progressId]
+      [progressId],
     );
 
     // Notify the employee
     await createNotification({
       user_id: ap.user_id,
-      type:    'progress_approved',
-      title:   `Progress approved ✓`,
+      type: "progress_approved",
+      title: `Progress approved ✓`,
       message: `Your log of ${ap.units_completed} unit(s) for "${ap.task_name}" (${ap.role}) on "${ap.project_name}" has been approved.`,
     });
 
@@ -457,7 +516,7 @@ const approveProgress = async (req, res, next) => {
 const rejectProgress = async (req, res, next) => {
   try {
     const { progressId } = req.params;
-    const { reason }     = req.body;
+    const { reason } = req.body;
 
     // ✅ Fetch context with employee name from master.emp
     const rows = await query(
@@ -467,26 +526,29 @@ const rejectProgress = async (req, res, next) => {
        LEFT JOIN master.emp e ON ap.emp_id = e.emp_id
        LEFT JOIN projects p    ON a.project_id     = p.id
        WHERE ap.id = ?`,
-      [progressId]
+      [progressId],
     );
 
-    if (rows.length === 0) return res.status(404).json({ message: "Progress log not found" });
+    if (rows.length === 0)
+      return res.status(404).json({ message: "Progress log not found" });
     const ap = rows[0];
 
-    if (ap.status !== 'PENDING') {
-      return res.status(400).json({ message: `Cannot reject — current status is ${ap.status}` });
+    if (ap.status !== "PENDING") {
+      return res
+        .status(400)
+        .json({ message: `Cannot reject — current status is ${ap.status}` });
     }
 
     await query(
       `UPDATE assignment_progress SET status = 'REJECTED', rejection_reason = ? WHERE id = ?`,
-      [reason || null, progressId]
+      [reason || null, progressId],
     );
 
     // Notify the employee
     await createNotification({
       user_id: ap.user_id,
-      type:    'progress_rejected',
-      title:   `Progress update rejected`,
+      type: "progress_rejected",
+      title: `Progress update rejected`,
       message: `Your log of ${ap.units_completed} unit(s) for "${ap.task_name}" on "${ap.project_name}" was rejected.${reason ? ` Reason: ${reason}` : ""}`,
     });
 
@@ -504,7 +566,7 @@ const getOverallUtilization = async (req, res, next) => {
   try {
     // ─── Get all active employees from master.emp ────────────────
     const employees = await masterQuery(
-      `SELECT u_id, emp_id, emp_name FROM emp WHERE flag = 'Active'`
+      `SELECT u_id, emp_id, emp_name FROM emp WHERE flag = 'Active'`,
     );
 
     if (employees.length === 0) {
@@ -512,11 +574,12 @@ const getOverallUtilization = async (req, res, next) => {
     }
 
     // ─── Get u_ids for the assignment query ──────────────────────
-    const uIds = employees.map(e => e.u_id);
-    const uIdPlaceholders = uIds.map(() => '?').join(',');
+    const uIds = employees.map((e) => e.u_id);
+    const uIdPlaceholders = uIds.map(() => "?").join(",");
 
     // ─── Get assignment data for these employees ──────────────────
-    const assignmentData = await query(`
+    const assignmentData = await query(
+      `
       SELECT
         a.user_id,
         COALESCE(SUM(a.units_assigned), 0) AS total_assigned,
@@ -530,36 +593,42 @@ const getOverallUtilization = async (req, res, next) => {
       ) ap_totals ON a.id = ap_totals.assignment_id
       WHERE a.user_id IN (${uIdPlaceholders})
       GROUP BY a.user_id
-    `, uIds);
+    `,
+      uIds,
+    );
 
     // ─── Create a map for quick lookup ────────────────────────────
     const assignmentMap = {};
-    assignmentData.forEach(row => {
+    assignmentData.forEach((row) => {
       assignmentMap[row.user_id] = {
         total_assigned: parseFloat(row.total_assigned) || 0,
-        total_completed: parseFloat(row.total_completed) || 0
+        total_completed: parseFloat(row.total_completed) || 0,
       };
     });
 
     // ─── Combine employee data with assignment data ──────────────
-    const result = employees.map(emp => {
-      const data = assignmentMap[emp.u_id] || { total_assigned: 0, total_completed: 0 };
+    const result = employees.map((emp) => {
+      const data = assignmentMap[emp.u_id] || {
+        total_assigned: 0,
+        total_completed: 0,
+      };
       const totalAssigned = data.total_assigned;
       const totalCompleted = data.total_completed;
       const totalPending = totalAssigned - totalCompleted;
-      const utilizationPct = totalAssigned > 0 
-        ? Math.round((totalCompleted / totalAssigned) * 100 * 10) / 10
-        : 0;
+      const utilizationPct =
+        totalAssigned > 0
+          ? Math.round((totalCompleted / totalAssigned) * 100 * 10) / 10
+          : 0;
 
       return {
         user_id: emp.u_id,
         user_name: emp.emp_name,
-        user_role: 'EMP', // Default role since it comes from RBAC
+        user_role: "EMP", // Default role since it comes from RBAC
         daily_capacity: 8, // Default capacity
         total_assigned: totalAssigned,
         total_completed: totalCompleted,
         total_pending: totalPending,
-        utilization_pct: utilizationPct
+        utilization_pct: utilizationPct,
       };
     });
 
@@ -567,9 +636,8 @@ const getOverallUtilization = async (req, res, next) => {
     result.sort((a, b) => b.utilization_pct - a.utilization_pct);
 
     return res.status(200).json(result);
-    
   } catch (err) {
-    console.error('❌ getOverallUtilization error:', err);
+    console.error("❌ getOverallUtilization error:", err);
     return next(err);
   }
 };
@@ -630,9 +698,8 @@ const getProjectUtilization = async (req, res, next) => {
 
     const rows = await query(sql, params);
     return res.status(200).json(rows);
-    
   } catch (err) {
-    console.error('❌ getProjectUtilization error:', err);
+    console.error("❌ getProjectUtilization error:", err);
     return next(err);
   }
 };
@@ -746,7 +813,7 @@ const getProjectUnitSummary = async (req, res, next) => {
     const rows = await query(sql, params);
     return res.status(200).json(rows);
   } catch (err) {
-    console.error('❌ getProjectUnitSummary error:', err);
+    console.error("❌ getProjectUnitSummary error:", err);
     return next(err);
   }
 };
@@ -763,7 +830,7 @@ const getEmployeeUnitSummary = async (req, res, next) => {
     const { projectId, empId } = req.query;
 
     if (!empId) {
-      return res.status(400).json({ message: 'empId is required' });
+      return res.status(400).json({ message: "empId is required" });
     }
 
     // ── 1. Per-project task breakdown for this employee ─────────────────────
@@ -871,7 +938,7 @@ const getEmployeeUnitSummary = async (req, res, next) => {
     // ── 4. Fetch employee name from master ──────────────────────────────────
     const empInfo = await masterQuery(
       `SELECT emp_name, emp_id FROM emp WHERE emp_id = ? LIMIT 1`,
-      [empId]
+      [empId],
     );
 
     return res.status(200).json({
@@ -881,7 +948,7 @@ const getEmployeeUnitSummary = async (req, res, next) => {
       overall_summary: overallRow[0] || {},
     });
   } catch (err) {
-    console.error('❌ getEmployeeUnitSummary error:', err);
+    console.error("❌ getEmployeeUnitSummary error:", err);
     return next(err);
   }
 };
@@ -900,7 +967,7 @@ const exportEmployeeProjectUnit = async (req, res, next) => {
     // Resolve employee name
     const empInfo = await masterQuery(
       `SELECT emp_name FROM emp WHERE emp_id = ? LIMIT 1`,
-      [empId]
+      [empId],
     );
     const empName = empInfo[0]?.emp_name || empId;
 
@@ -935,7 +1002,7 @@ const exportEmployeeProjectUnit = async (req, res, next) => {
 
     const rows = await query(sql, params);
 
-    const excelRows = rows.map(r => {
+    const excelRows = rows.map((r) => {
       const assignedUnits = Number(r.units_assigned || 0);
       const completedUnits = Number(r.units_completed || 0);
       const pendingUnits = Number(r.units_pending || 0);
@@ -947,9 +1014,13 @@ const exportEmployeeProjectUnit = async (req, res, next) => {
       const completedPD = Number((utilizedHrs / 8).toFixed(2));
       const pendingPD = Number((pendingHrs / 8).toFixed(2));
 
-      const unitPct = assignedUnits > 0 ? Math.round((completedUnits / assignedUnits) * 100) : 0;
+      const unitPct =
+        assignedUnits > 0
+          ? Math.round((completedUnits / assignedUnits) * 100)
+          : 0;
       const pdPct = totalPD > 0 ? Math.round((completedPD / totalPD) * 100) : 0;
-      const hrsPct = assignedHrs > 0 ? Math.round((utilizedHrs / assignedHrs) * 100) : 0;
+      const hrsPct =
+        assignedHrs > 0 ? Math.round((utilizedHrs / assignedHrs) * 100) : 0;
 
       return {
         "Employee Name": empName,
@@ -963,25 +1034,46 @@ const exportEmployeeProjectUnit = async (req, res, next) => {
         "Pending Person Days": pendingPD,
         "Unit Utilization (%)": `${unitPct}%`,
         "Person Days Utilization (%)": `${pdPct}%`,
-        "Hours Utilization (%)": `${hrsPct}%`
+        "Hours Utilization (%)": `${hrsPct}%`,
       };
     });
 
     const worksheet = XLSX.utils.json_to_sheet(excelRows);
     worksheet["!cols"] = [
-      { wch: 22 }, { wch: 26 }, { wch: 24 }, { wch: 14 },
-      { wch: 18 }, { wch: 16 }, { wch: 22 }, { wch: 14 },
-      { wch: 20 }, { wch: 20 }, { wch: 24 }, { wch: 20 }
+      { wch: 22 },
+      { wch: 26 },
+      { wch: 24 },
+      { wch: 14 },
+      { wch: 18 },
+      { wch: 16 },
+      { wch: 22 },
+      { wch: 14 },
+      { wch: 20 },
+      { wch: 20 },
+      { wch: 24 },
+      { wch: 20 },
     ];
 
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Project Employee Utilization");
+    XLSX.utils.book_append_sheet(
+      workbook,
+      worksheet,
+      "Project Employee Utilization",
+    );
 
-    const excelBuffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader("Content-Disposition", 'attachment; filename="Employee_Utilization_Project.xlsx"');
+    const excelBuffer = XLSX.write(workbook, {
+      bookType: "xlsx",
+      type: "buffer",
+    });
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="Employee_Utilization_Project.xlsx"',
+    );
     return res.send(excelBuffer);
-
   } catch (err) {
     console.error("❌ exportEmployeeProjectUnit error:", err);
     return next(err);
@@ -1002,7 +1094,7 @@ const exportEmployeeOverallUnit = async (req, res, next) => {
     // Resolve employee name
     const empInfo = await masterQuery(
       `SELECT emp_name FROM emp WHERE emp_id = ? LIMIT 1`,
-      [empId]
+      [empId],
     );
     const empName = empInfo[0]?.emp_name || empId;
 
@@ -1032,7 +1124,7 @@ const exportEmployeeOverallUnit = async (req, res, next) => {
 
     const rows = await query(sql, [empId]);
 
-    const excelRows = rows.map(r => {
+    const excelRows = rows.map((r) => {
       const assignedUnits = Number(r.units_assigned || 0);
       const completedUnits = Number(r.units_completed || 0);
       const pendingUnits = Number(r.units_pending || 0);
@@ -1044,9 +1136,13 @@ const exportEmployeeOverallUnit = async (req, res, next) => {
       const completedPD = Number((utilizedHrs / 8).toFixed(2));
       const pendingPD = Number((pendingHrs / 8).toFixed(2));
 
-      const unitPct = assignedUnits > 0 ? Math.round((completedUnits / assignedUnits) * 100) : 0;
+      const unitPct =
+        assignedUnits > 0
+          ? Math.round((completedUnits / assignedUnits) * 100)
+          : 0;
       const pdPct = totalPD > 0 ? Math.round((completedPD / totalPD) * 100) : 0;
-      const hrsPct = assignedHrs > 0 ? Math.round((utilizedHrs / assignedHrs) * 100) : 0;
+      const hrsPct =
+        assignedHrs > 0 ? Math.round((utilizedHrs / assignedHrs) * 100) : 0;
 
       return {
         "Employee Name": empName,
@@ -1060,25 +1156,46 @@ const exportEmployeeOverallUnit = async (req, res, next) => {
         "Pending Person Days": pendingPD,
         "Unit Utilization (%)": `${unitPct}%`,
         "Person Days Utilization (%)": `${pdPct}%`,
-        "Hours Utilization (%)": `${hrsPct}%`
+        "Hours Utilization (%)": `${hrsPct}%`,
       };
     });
 
     const worksheet = XLSX.utils.json_to_sheet(excelRows);
     worksheet["!cols"] = [
-      { wch: 22 }, { wch: 26 }, { wch: 24 }, { wch: 14 },
-      { wch: 18 }, { wch: 16 }, { wch: 22 }, { wch: 14 },
-      { wch: 20 }, { wch: 20 }, { wch: 24 }, { wch: 20 }
+      { wch: 22 },
+      { wch: 26 },
+      { wch: 24 },
+      { wch: 14 },
+      { wch: 18 },
+      { wch: 16 },
+      { wch: 22 },
+      { wch: 14 },
+      { wch: 20 },
+      { wch: 20 },
+      { wch: 24 },
+      { wch: 20 },
     ];
 
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Overall Employee Utilization");
+    XLSX.utils.book_append_sheet(
+      workbook,
+      worksheet,
+      "Overall Employee Utilization",
+    );
 
-    const excelBuffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader("Content-Disposition", 'attachment; filename="Employee_Overall_Utilization.xlsx"');
+    const excelBuffer = XLSX.write(workbook, {
+      bookType: "xlsx",
+      type: "buffer",
+    });
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="Employee_Overall_Utilization.xlsx"',
+    );
     return res.send(excelBuffer);
-
   } catch (err) {
     console.error("❌ exportEmployeeOverallUnit error:", err);
     return next(err);
@@ -1099,4 +1216,3 @@ module.exports = {
   exportEmployeeProjectUnit,
   exportEmployeeOverallUnit,
 };
-
