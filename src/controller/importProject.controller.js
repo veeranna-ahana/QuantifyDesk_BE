@@ -1174,7 +1174,8 @@ const getProjectView = async (req, res, next) => {
         teamMembersMap.set(row.emp_id, {
           emp_id: row.emp_id,
           emp_name: row.emp_name,
-          role: row.role,
+          role: null, // set below: every distinct role, comma-separated
+          roles: [],
           alloc_hours: 0,
           logged_hours: loggedHoursByEmpId.get(String(row.emp_id)) || 0,
           tasks: 0,
@@ -1185,45 +1186,47 @@ const getProjectView = async (req, res, next) => {
       }
       const m = teamMembersMap.get(row.emp_id);
       m.alloc_hours += Number(row.total_hours) || 0;
-      const s = taskStatsByRole.get(row.role) || EMPTY_STATS;
-      m.tasks += s.tasks;
-      m.done += s.done;
-      m.pending += s.pending;
-      m.units += s.units;
+      // A role's task/unit stats are credited once per distinct role, so a person with two
+      // effort rows under the same role isn't double-counted.
+      if (row.role && !m.roles.includes(row.role)) {
+        m.roles.push(row.role);
+        const s = taskStatsByRole.get(row.role) || EMPTY_STATS;
+        m.tasks += s.tasks;
+        m.done += s.done;
+        m.pending += s.pending;
+        m.units += s.units;
+      }
     }
-    const team_members = [...teamMembersMap.values()];
+    const team_members = [...teamMembersMap.values()].map((m) => ({
+      ...m,
+      role: m.roles.join(", ") || null,
+    }));
 
-    // Task Allocation & Timesheet Details table: one row per effort_estimate row (person +
-    // role, so a multi-role person gets a row per role here, unlike the Team Members table
-    // above) enriched with that ROLE's task/unit stats.
-    const task_allocation = effortRows.map((row) => {
-      const s = taskStatsByRole.get(row.role) || EMPTY_STATS;
-      const allocHours = Number(row.total_hours) || 0;
-      // HRMS's logged hours are tracked per EMPLOYEE, not per (employee, role) — there's no way
-      // to split a person's logged hours across their multiple roles here, so a multi-role
-      // person's full logged total is shown against each of their role rows (same caveat as
-      // tasks/units above, which are also joined by role rather than a per-row assignment).
-      const loggedHours = loggedHoursByEmpId.get(String(row.emp_id)) || 0;
+    // Task Allocation & Timesheet Details table: ONE row per person (same grouping as the Team
+    // Members table above). A person with several roles (e.g. BE Dev + DevOps) shows all their
+    // roles in one cell, the SUM of their allocated hours across those roles, and their single
+    // HRMS logged-hours total — HRMS tracks logged hours per employee, not per role, so splitting
+    // into one row per role would show the same logged total against each role and look like it
+    // was logged twice.
+    const task_allocation = team_members.map((m) => {
+      const allocHours = Math.round(m.alloc_hours * 100) / 100;
+      const loggedHours = m.logged_hours;
       return {
-        emp_id: row.emp_id,
-        emp_name: row.emp_name,
-        role: row.role,
-        units: s.units,
-        tasks: s.tasks,
-        completed: s.done,
-        pending: s.pending,
+        emp_id: m.emp_id,
+        emp_name: m.emp_name,
+        role: m.role,
+        roles: m.roles,
+        units: m.units,
+        tasks: m.tasks,
+        completed: m.done,
+        pending: m.pending,
         alloc_hours: allocHours,
-        // Progress here is task-completion progress (completed/tasks), which is real, live PMS
-        // task-status data — it doesn't need HRMS at all. 0 tasks tagged to this role yet (e.g. a
-        // member added to Effort Estimate manually, with no matching Task Info rows) shows as a
-        // real 0% bar rather than `—`, same as a row with tasks that just haven't been started.
+        // Task-completion progress (completed/tasks) from live PMS task status — no HRMS needed.
         progress_percent:
-          s.tasks > 0 ? Math.round((s.done / s.tasks) * 100) : 0,
+          m.tasks > 0 ? Math.round((m.done / m.tasks) * 100) : 0,
         logged_hours: loggedHours,
-        // 0 logged hours against a real allocation IS under-utilization, not "unknown" — so this
-        // no longer gates on hasLoggedData (no HRMS row at all defaults loggedHours to 0 via
-        // loggedHoursByEmpId.get(...) || 0 above, same as an HRMS row that explicitly says 0).
-        // The only case left as null (renders `—`) is nothing allocated to compare against.
+        // 0 logged hours against a real allocation IS under-utilization, not "unknown". Only
+        // "nothing allocated to compare against" is null (renders `—`).
         variance_hours:
           allocHours > 0
             ? Math.round((loggedHours - allocHours) * 100) / 100
