@@ -98,7 +98,36 @@ const login = async (req, res) => {
       }
     }
 
+    // SECURITY: the Authorization token on this endpoint must be the MyAhana PORTAL token.
+    // A token that verifies against OUR OWN signing secret is Quantify's own access JWT (the
+    // one the frontend stores after login) — never a portal token. Accepting it would send it
+    // to RBAC/PMS (which reject it with 401) and cache it as the user's PMS token.
+    if (authToken) {
+      let isOwnJwt = false;
+      try {
+        jwt.verify(authToken, process.env.JWT_ACCESS_SECRET);
+        isOwnJwt = true;
+      } catch {
+        // not ours — expected for a real portal token
+      }
+      if (isOwnJwt) {
+        console.warn(
+          `⚠️ Login rejected for emp_id=${user.emp_id}: Quantify's own JWT was sent as the portal token`,
+        );
+        return res.status(401).json({
+          status: "error",
+          success: false,
+          code: "PORTAL_TOKEN_REQUIRED",
+          message: "Please log in through the MyAhana portal.",
+        });
+      }
+    }
+
     // Fetch RBC/RBAC details (with or without authToken)
+    // tokenVerified = the portal itself (RBAC API) accepted this token. A password-less login
+    // is only allowed when this is true — the token must never be trusted on its own.
+    let tokenVerified = false;
+    let rbacAuthFailed = false; // portal explicitly rejected the token (401/403)
     let rbacData = null;
     let departmentData = [];
     let serviceDeliveryEmployees = []; // For CR: Store Service Delivery employees
@@ -129,9 +158,13 @@ const login = async (req, res) => {
             "/employee_role_associate/get-current-employees-role-details",
           );
           rbacData = rbacResponse.data;
+          tokenVerified = !!authToken;
           // console.log("🔐 Fetched RBAC data successfully");
         } catch (rbacError) {
           console.warn("⚠️ RBAC fetch failed (attempt 1):", rbacError.message);
+          const rbacStatus = rbacError.response?.status;
+          rbacAuthFailed =
+            !!authToken && (rbacStatus === 401 || rbacStatus === 403);
 
           // Fallback: Try with emp_id parameter
           if (emp_id) {
@@ -151,6 +184,36 @@ const login = async (req, res) => {
               rbacData = null;
             }
           }
+        }
+
+        // SECURITY: no password => the portal token IS the credential. Only the first RBAC call
+        // (made WITH the token) counts as proof; the emp_id-only fallback above proves nothing.
+        // Fail closed: invalid token => 401, portal unreachable => 503. Never fall through to a
+        // default-role login.
+        if (!password && !tokenVerified) {
+          console.warn(
+            `⚠️ Password-less login refused for emp_id=${user.emp_id} from ${req.ip}: ${
+              rbacAuthFailed
+                ? "portal rejected the token"
+                : "token could not be verified"
+            }`,
+          );
+          if (rbacAuthFailed) {
+            return res.status(401).json({
+              status: "error",
+              success: false,
+              code: "PORTAL_TOKEN_INVALID",
+              message:
+                "Your MyAhana session is invalid or has expired. Please log in again through MyAhana.",
+            });
+          }
+          return res.status(503).json({
+            status: "error",
+            success: false,
+            code: "PORTAL_UNREACHABLE",
+            message:
+              "Could not verify your MyAhana session right now. Please try again.",
+          });
         }
 
         // Fetch departments (only with authToken)
@@ -244,6 +307,16 @@ const login = async (req, res) => {
       }
     } else {
       console.warn("⚠️ RBAC_API_URL not configured in .env");
+      if (!password) {
+        // Cannot verify a token-only login without the portal — refuse rather than trust it.
+        return res.status(503).json({
+          status: "error",
+          success: false,
+          code: "PORTAL_UNREACHABLE",
+          message:
+            "Could not verify your MyAhana session right now. Please try again.",
+        });
+      }
     }
 
     // Process login result
@@ -277,7 +350,7 @@ const login = async (req, res) => {
     // UAT token here, keyed by emp_id, so any controller calling PMS later
     // can look it up via req.user.emp_id instead of relying on the
     // frontend to carry and re-attach it. See src/helpers/pmsTokenStore.js.
-    if (authToken) {
+    if (authToken && tokenVerified) {
       try {
         // Decode only — we don't hold UAT's signing secret, so we can't
         // (and don't need to) verify it here; PMS will do its own
