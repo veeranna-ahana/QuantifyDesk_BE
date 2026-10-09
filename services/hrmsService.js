@@ -70,4 +70,51 @@ async function fetchTimesheetForProject(projectCode, { token, uniqueId }) {
   return res.data;
 }
 
-module.exports = { getHrmsToken, fetchTimesheetForProject };
+const ALL_EMPLOYEES_URL = `${HRMS_BASE}/AhanaApi/Ahana/GetAllEmployeeData`;
+
+/**
+ * Fetch all employees from HRMS.
+ * Returns the raw `data` array (may be nested: data = [[ {..}, {..} ]]).
+ */
+async function fetchAllEmployeesFromHrms() {
+  // HRMS tokens are single-use — fetch a fresh one
+  const { token, uniqueId } = await getHrmsToken();
+
+  const body = {
+    Token: token,
+    UniqueId: uniqueId,
+  };
+
+  const res = await axios.post(ALL_EMPLOYEES_URL, body, {
+    headers: {
+      'Content-Type': 'application/json',
+      Cookie: process.env.HRMS_SESSION_COOKIE || '',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    },
+    timeout: TIMEOUT,
+  });
+
+ const raw = res.data?.data || res.data?.Data || [];
+
+// HRMS GetAllEmployeeData returns: data = [ { rows: [ ...employees... ] } ]
+// Unwrap that specific shape first.
+let rows = raw;
+
+// Case: data = [ { rows: [...] } ]
+if (Array.isArray(rows) && rows.length > 0 && Array.isArray(rows[0]?.rows)) {
+  rows = rows[0].rows;
+}
+// Case: data = [ [ {...}, {...} ] ]  (like GetTimeSheetData)
+else if (Array.isArray(rows) && Array.isArray(rows[0])) {
+  rows = rows[0];
+}
+// Case: data = { rows: [...] }
+else if (!Array.isArray(rows) && Array.isArray(rows?.rows)) {
+  rows = rows.rows;
+}
+
+console.log('📥 HRMS employees fetched:', rows.length);
+return rows;
+}
+
+module.exports = { getHrmsToken, fetchTimesheetForProject, fetchAllEmployeesFromHrms,  };

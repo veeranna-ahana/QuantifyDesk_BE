@@ -270,9 +270,75 @@ const getCategoryTimesheetsGroupedByEmployee = async (req, res) => {
   }
 };
 
+
+//Timesheet report api
+const getAllCategoriesTimesheetsReport = async (req, res) => {
+  try {
+    const includeEmpty = String(req.query.include_empty || '').toLowerCase() === 'true';
+
+    const rows = await query(
+      `SELECT DISTINCT sub_category
+         FROM project_info
+        WHERE sub_category IS NOT NULL AND TRIM(sub_category) <> ''
+        ORDER BY sub_category`
+    );
+
+    const categories = rows.map((r) => r.sub_category);
+    const results = [];
+
+    for (const code of categories) {
+      const result = await fetchCategoryTimesheetsGroupedByEmployee(code);
+      if (!includeEmpty && (result?.count ?? 0) === 0) continue;
+      results.push({
+        projectcategory_code: code,
+        count: result?.count ?? 0,
+        totals: {
+          total_hours: result?.total_hours ?? 0,
+          approved_hours: result?.approved_hours ?? 0,
+          pending_hours: result?.pending_hours ?? 0,
+          rejected_hours: result?.rejected_hours ?? 0,
+          total_entries: result?.total_entries ?? 0,
+          total_employees: result?.total_employees ?? 0,
+        },
+        data: result?.data ?? [],
+      });
+    }
+
+    // Grand totals
+    const grand = { total_hours: 0, approved_hours: 0, pending_hours: 0, rejected_hours: 0, total_entries: 0, total_employees: 0 };
+    const empSet = new Set();
+    for (const r of results) {
+      grand.total_hours     += r.totals.total_hours;
+      grand.approved_hours  += r.totals.approved_hours;
+      grand.pending_hours   += r.totals.pending_hours;
+      grand.rejected_hours  += r.totals.rejected_hours;
+      grand.total_entries   += r.totals.total_entries;
+      for (const e of r.data) if (e.employee_id) empSet.add(e.employee_id);
+    }
+    grand.total_employees = empSet.size;
+    for (const k of ['total_hours','approved_hours','pending_hours','rejected_hours']) {
+      grand[k] = Math.round(grand[k] * 100) / 100;
+    }
+
+    return res.status(200).json({
+      success: true,
+      total_categories: results.length,
+      totals: grand,
+      categories: results,
+    });
+  } catch (err) {
+    console.error('❌ getAllCategoriesTimesheetsReport error:', err.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to load all-categories timesheet report',
+      error: err.message,
+    });
+  }
+};
 module.exports = {
   syncHrmsTimesheets,
   getHrmsTimesheets,
   getCategoryTimesheetsGroupedByEmployee,
   fetchCategoryTimesheetsGroupedByEmployee,
+  getAllCategoriesTimesheetsReport
 };
