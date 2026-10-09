@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { syncHrmsTimesheets, getHrmsTimesheets,  getCategoryTimesheetsGroupedByEmployee, 
+const { syncHrmsTimesheets, getHrmsTimesheets,  getCategoryTimesheetsGroupedByEmployee, getAllCategoriesTimesheetsReport
  } = require('../controller/projectTimesheet.controller');
 
 // POST /api/hrms/sync-timesheets
@@ -11,6 +11,11 @@ router.post('/sync-timesheets', syncHrmsTimesheets);
 router.get('/timesheets', getHrmsTimesheets);
 
 router.get('/timesheets-by-category', getCategoryTimesheetsGroupedByEmployee); 
+//GET Timesheet Report
+router.get(
+  '/timesheets-all-categories-report',
+  getAllCategoriesTimesheetsReport
+);
 
 module.exports = router;
 
@@ -199,6 +204,95 @@ module.exports = router;
  *                   example: projectcategory_code is required
  *       500:
  *         description: Failed to load grouped HRMS timesheets
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/HrmsTimesheetError'
+ */
+
+/**
+ * @swagger
+ * /hrms/timesheets-all-categories-report:
+ *   get:
+ *     summary: Get timesheet report for all categories
+ *     description: Returns grouped employee timesheets and hour totals for each project category, with grand totals across the report.
+ *     tags: [HRMS Timesheets]
+ *     parameters:
+ *       - in: query
+ *         name: include_empty
+ *         schema:
+ *           type: boolean
+ *           default: false
+ *         description: Include categories with no timesheet records.
+ *     responses:
+ *       200:
+ *         description: All-categories timesheet report retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 total_categories:
+ *                   type: integer
+ *                   example: 2
+ *                 totals:
+ *                   type: object
+ *                   properties:
+ *                     total_hours:
+ *                       type: number
+ *                       format: double
+ *                     approved_hours:
+ *                       type: number
+ *                       format: double
+ *                     pending_hours:
+ *                       type: number
+ *                       format: double
+ *                     rejected_hours:
+ *                       type: number
+ *                       format: double
+ *                     total_entries:
+ *                       type: integer
+ *                     total_employees:
+ *                       type: integer
+ *                 categories:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       projectcategory_code:
+ *                         type: string
+ *                         example: NBD3011
+ *                       count:
+ *                         type: integer
+ *                         description: Number of grouped employee rows in this category.
+ *                       totals:
+ *                         type: object
+ *                         properties:
+ *                           total_hours:
+ *                             type: number
+ *                             format: double
+ *                           approved_hours:
+ *                             type: number
+ *                             format: double
+ *                           pending_hours:
+ *                             type: number
+ *                             format: double
+ *                           rejected_hours:
+ *                             type: number
+ *                             format: double
+ *                           total_entries:
+ *                             type: integer
+ *                           total_employees:
+ *                             type: integer
+ *                       data:
+ *                         type: array
+ *                         items:
+ *                           $ref: '#/components/schemas/HrmsTimesheetGrouped'
+ *       500:
+ *         description: Failed to load all-categories timesheet report
  *         content:
  *           application/json:
  *             schema:
