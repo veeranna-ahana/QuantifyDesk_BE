@@ -1032,6 +1032,7 @@ const getProjectView = async (req, res, next) => {
           allocation: t.allocation ?? null,
           // ── Locally owned (editable, from task_info) ─────────────────
           emp_id: overlay.emp_id ?? null,
+          pms_emp_id: t.emp_id ?? null, // PMS's own assignee (raw), used for per-person task stats
           role: overlay.role ?? null,
           task_type: overlay.task_type ?? null,
           unit: overlay.unit ?? null,
@@ -1165,6 +1166,43 @@ const getProjectView = async (req, res, next) => {
     }
     const EMPTY_STATS = { tasks: 0, done: 0, pending: 0, units: 0 };
 
+    // Per-ASSIGNEE task counts: who PMS says the task is assigned to (tasksDetails.emp_id, falling
+    // back to the assignee's name). This is what the user sees as the task Owner, and it does NOT
+    // depend on the Role/Task Type/Unit overlay having been filled in for every task — a freshly
+    // imported project usually has no role on its tasks yet, which made the role-only join above
+    // give every member 0 tasks (and an empty Work Allocation pie).
+    const normName = (v) =>
+      String(v ?? "")
+        .trim()
+        .toLowerCase();
+    const taskStatsByAssignee = new Map(); // key: `id:<emp_id>` or `name:<emp_name>`
+    const addAssigneeStat = (key, t) => {
+      if (!taskStatsByAssignee.has(key)) {
+        taskStatsByAssignee.set(key, {
+          tasks: 0,
+          done: 0,
+          pending: 0,
+          units: 0,
+        });
+      }
+      const st = taskStatsByAssignee.get(key);
+      st.tasks += 1;
+      st.units += Number(t.unit) || 0;
+      if (normalizeTaskStatus(t.status) === "completed") st.done += 1;
+      else st.pending += 1;
+    };
+    for (const t of allTasks) {
+      // Registered under BOTH id and name (when both exist) so a member can be matched either way;
+      // a member only ever reads ONE of the two keys, so nothing is double-counted.
+      if (t.pms_emp_id != null && t.pms_emp_id !== "")
+        addAssigneeStat(`id:${normName(t.pms_emp_id)}`, t);
+      if (t.owner) addAssigneeStat(`name:${normName(t.owner)}`, t);
+    }
+    const assigneeStatsFor = (empId, empName) =>
+      taskStatsByAssignee.get(`id:${normName(empId)}`) ||
+      taskStatsByAssignee.get(`name:${normName(empName)}`) ||
+      null;
+
     // Team Members table: one row per person (a person can hold more than one role — see the
     // multi-role Effort Estimate fix — so their alloc_hours AND task/unit stats here are summed
     // across all their effort_estimate rows/roles).
@@ -1176,6 +1214,7 @@ const getProjectView = async (req, res, next) => {
           emp_name: row.emp_name,
           role: null, // set below: every distinct role, comma-separated
           roles: [],
+          roleStats: [],
           alloc_hours: 0,
           logged_hours: loggedHoursByEmpId.get(String(row.emp_id)) || 0,
           tasks: 0,
@@ -1190,17 +1229,36 @@ const getProjectView = async (req, res, next) => {
       // effort rows under the same role isn't double-counted.
       if (row.role && !m.roles.includes(row.role)) {
         m.roles.push(row.role);
-        const s = taskStatsByRole.get(row.role) || EMPTY_STATS;
-        m.tasks += s.tasks;
-        m.done += s.done;
-        m.pending += s.pending;
-        m.units += s.units;
+        m.roleStats.push(taskStatsByRole.get(row.role) || EMPTY_STATS);
       }
     }
-    const team_members = [...teamMembersMap.values()].map((m) => ({
-      ...m,
-      role: m.roles.join(", ") || null,
-    }));
+    // Task stats: the member's own PMS-assigned tasks when there are any; otherwise fall back to the
+    // role-based credit (the previous behaviour) so nothing regresses for projects whose PMS
+    // assignees can't be matched to the effort-estimate team.
+    for (const m of teamMembersMap.values()) {
+      const own = assigneeStatsFor(m.emp_id, m.emp_name);
+      const st =
+        own ||
+        m.roleStats.reduce(
+          (acc, r) => ({
+            tasks: acc.tasks + r.tasks,
+            done: acc.done + r.done,
+            pending: acc.pending + r.pending,
+            units: acc.units + r.units,
+          }),
+          { ...EMPTY_STATS },
+        );
+      m.tasks = st.tasks;
+      m.done = st.done;
+      m.pending = st.pending;
+      m.units = st.units;
+    }
+    const team_members = [...teamMembersMap.values()].map(
+      ({ roleStats, ...m }) => ({
+        ...m,
+        role: m.roles.join(", ") || null,
+      }),
+    );
 
     // Task Allocation & Timesheet Details table: ONE row per person (same grouping as the Team
     // Members table above). A person with several roles (e.g. BE Dev + DevOps) shows all their
