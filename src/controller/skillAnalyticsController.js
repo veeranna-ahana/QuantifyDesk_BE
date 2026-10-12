@@ -1,9 +1,13 @@
-const { query } = require('../config/db');
-const { fetchAllEmployeesFromHrms } = require('../../services/hrmsService');
-const { getSkillsMap } = require('../../services/skillFinderService');
-const { getUatToken } = require('../../helpers/pmsTokenStore');
-const { calcExperienceYears } = require('../../helpers/experience');
-const { pmsGet } = require('../../helpers/pmsHelper');
+const { query } = require("../config/db");
+const { fetchAllEmployeesFromHrms } = require("../../services/hrmsService");
+const { getSkillsMap } = require("../../services/skillFinderService");
+const { getUatToken } = require("../../helpers/pmsTokenStore");
+const { calcExperienceYears } = require("../../helpers/experience");
+const { pmsGet } = require("../../helpers/pmsHelper");
+const {
+  getEmployeePmsInfo,
+  isEmployeeInfoCached,
+} = require("../../helpers/employeePmsInfo");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Concurrency helper (inline — no external dependency)
@@ -47,7 +51,7 @@ const getSkillAnalytics = async (req, res) => {
     if (!uatToken) {
       return res.status(401).json({
         success: false,
-        message: 'No PMS session found. Please log in again.',
+        message: "No PMS session found. Please log in again.",
       });
     }
 
@@ -55,14 +59,14 @@ const getSkillAnalytics = async (req, res) => {
     const rawDept = req.query.department;
     const filterDept =
       rawDept === undefined
-        ? 'Delivery'                                       // default
-        : rawDept === 'all' || rawDept === ''
-          ? ''                                             // disable filter
+        ? "Delivery" // default
+        : rawDept === "all" || rawDept === ""
+          ? "" // disable filter
           : String(rawDept).trim();
 
-    const filterSkill = (req.query.skill || '').trim();
+    const filterSkill = (req.query.skill || "").trim();
     const includeSubSkills =
-      String(req.query.include_sub_skills || '').toLowerCase() === 'true';
+      String(req.query.include_sub_skills || "").toLowerCase() === "true";
 
     // ─── 3. Fetch HRMS + Skill Finder ─────────────────────────────────
     const allEmployees = await fetchAllEmployeesFromHrms();
@@ -86,7 +90,7 @@ const getSkillAnalytics = async (req, res) => {
       // Department filter
       if (
         filterDept &&
-        String(hrms.Name_of_Department || '').trim() !== filterDept
+        String(hrms.Name_of_Department || "").trim() !== filterDept
       ) {
         continue;
       }
@@ -102,14 +106,16 @@ const getSkillAnalytics = async (req, res) => {
       };
 
       for (const skill of skillData.skill_names || []) {
-        if (filterSkill && skill.toLowerCase() !== filterSkill.toLowerCase()) continue;
+        if (filterSkill && skill.toLowerCase() !== filterSkill.toLowerCase())
+          continue;
         if (!bySkill.has(skill)) bySkill.set(skill, []);
         bySkill.get(skill).push(empObj);
       }
 
       if (includeSubSkills) {
         for (const sub of skillData.sub_skills || []) {
-          if (filterSkill && sub.toLowerCase() !== filterSkill.toLowerCase()) continue;
+          if (filterSkill && sub.toLowerCase() !== filterSkill.toLowerCase())
+            continue;
           if (!bySubSkill.has(sub)) bySubSkill.set(sub, []);
           bySubSkill.get(sub).push(empObj);
         }
@@ -133,7 +139,7 @@ const getSkillAnalytics = async (req, res) => {
     const projectsByEmp = new Map();
 
     if (empIdList.length > 0) {
-      const placeholders = empIdList.map(() => '?').join(',');
+      const placeholders = empIdList.map(() => "?").join(",");
 
       const projectRows = await query(
         `SELECT DISTINCT
@@ -148,7 +154,7 @@ const getSkillAnalytics = async (req, res) => {
          JOIN project_info pi ON pi.project_info_id = a.project_info_id
          WHERE a.emp_id IN (${placeholders})
          ORDER BY a.emp_id, pi.project_id`,
-        empIdList
+        empIdList,
       );
 
       // Fetch PMS titles once per unique project
@@ -159,14 +165,16 @@ const getSkillAnalytics = async (req, res) => {
           return projectTitleCache.get(pmsProjectId);
         }
         try {
-          const raw = await pmsGet(uatToken, '/api/pms/getProjectDetails', {
+          const raw = await pmsGet(uatToken, "/api/pms/getProjectDetails", {
             projectId: pmsProjectId,
           });
           const title = raw?.projectDetails?.project_title || null;
           projectTitleCache.set(pmsProjectId, title);
           return title;
         } catch (err) {
-          console.warn(`⚠️ PMS fetch failed for project ${pmsProjectId}: ${err.message}`);
+          console.warn(
+            `⚠️ PMS fetch failed for project ${pmsProjectId}: ${err.message}`,
+          );
           projectTitleCache.set(pmsProjectId, null);
           return null;
         }
@@ -177,7 +185,7 @@ const getSkillAnalytics = async (req, res) => {
       ];
 
       console.log(
-        `📡 Skill analytics: fetching PMS titles for ${uniqueProjectIds.length} project(s)`
+        `📡 Skill analytics: fetching PMS titles for ${uniqueProjectIds.length} project(s)`,
       );
 
       await runWithConcurrency(uniqueProjectIds, 3, getProjectTitle);
@@ -193,6 +201,21 @@ const getSkillAnalytics = async (req, res) => {
       }
     }
 
+    // ─── 5b. Current projects from PMS (any project, imported or not) ──
+    //      Same cached lookup as Member Details, so it is quick once that page has loaded.
+    const cachedCount = empIdList.filter(isEmployeeInfoCached).length;
+    console.log(
+      `📡 Skill analytics: PMS projects for ${empIdList.length - cachedCount} employee(s) (${cachedCount} cached)`,
+    );
+    await runWithConcurrency(empIdList, 8, async (empId) => {
+      const info = await getEmployeePmsInfo(uatToken, empId);
+      if (!info.projects.length) return;
+      const merged = projectsByEmp.get(empId) || [];
+      for (const title of info.projects)
+        if (!merged.includes(title)) merged.push(title);
+      projectsByEmp.set(empId, merged);
+    });
+
     // ─── 6. Format response ───────────────────────────────────────────
     const formatGroup = (map) =>
       [...map.entries()]
@@ -201,7 +224,7 @@ const getSkillAnalytics = async (req, res) => {
           employee_count: emps.length,
           employees: emps
             .sort((a, b) =>
-              String(a.emp_name).localeCompare(String(b.emp_name))
+              String(a.emp_name).localeCompare(String(b.emp_name)),
             )
             .map((e) => {
               const projects = projectsByEmp.get(e.emp_id) || [];
@@ -211,8 +234,7 @@ const getSkillAnalytics = async (req, res) => {
                 designation: e.designation,
                 department: e.department,
                 experience_years: e.experience_years,
-                projects:
-                  projects.length > 0 ? projects : ['No Projects'],
+                projects: projects.length > 0 ? projects : ["No Projects"],
               };
             }),
         }))
@@ -225,7 +247,7 @@ const getSkillAnalytics = async (req, res) => {
       success: true,
       total_skills: skills.length,
       filters: {
-        department: filterDept || 'ALL',
+        department: filterDept || "ALL",
         skill: filterSkill || null,
         include_sub_skills: includeSubSkills,
       },
@@ -233,10 +255,10 @@ const getSkillAnalytics = async (req, res) => {
       ...(includeSubSkills ? { sub_skills: subSkills } : {}),
     });
   } catch (err) {
-    console.error('❌ getSkillAnalytics error:', err.message);
+    console.error("❌ getSkillAnalytics error:", err.message);
     return res.status(500).json({
       success: false,
-      message: 'Failed to load skill analytics',
+      message: "Failed to load skill analytics",
       error: err.message,
     });
   }
