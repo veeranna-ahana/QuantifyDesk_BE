@@ -11,6 +11,7 @@ const {
   getActiveEmployees,
   getCurrentUser,
   getProjectTypes,
+  getTechStacks,
   getDocumentMaster,
   createProjectInfo,
   updateProjectInfo,
@@ -62,6 +63,8 @@ router.get("/me", authMiddleware, getCurrentUser);
 // (One Time Project / Managed Service / Staff Augmentation), maintained in
 // project_type_catalog so they can change without a frontend deploy.
 router.get("/project-types", authMiddleware, getProjectTypes);
+// GET /api/import-project/tech-stacks — multi-select Tech Stack options from tech_stack_master.
+router.get("/tech-stacks", authMiddleware, getTechStacks);
 
 // ── Step 4: Document Checklist ──────────────────────────────────────────
 // GET /api/import-project/documents — the fixed 16-row document_master
@@ -512,6 +515,22 @@ module.exports = router;
  *                   sub_category:
  *                     type: string
  *                     example: "Web Application"
+ *                   tech_lead_emp_id:
+ *                     type: string
+ *                     nullable: true
+ *                     description: HRMS emp_id of the Tech Lead (pick from GET /import-project/employees). Only the id is stored; the name is read live from HRMS.
+ *                     example: "AS00472"
+ *                   project_manager_emp_id:
+ *                     type: string
+ *                     nullable: true
+ *                     description: HRMS emp_id of the Project Manager (pick from GET /import-project/employees)
+ *                     example: "AS00717"
+ *                   tech_stack_ids:
+ *                     type: array
+ *                     description: Selected Tech Stack ids (from GET /import-project/tech-stacks). Unknown or inactive ids are dropped; an empty array clears the selection.
+ *                     items:
+ *                       type: integer
+ *                     example: [1, 4, 7]
  *               tasks:
  *                 type: array
  *                 items:
@@ -580,6 +599,9 @@ module.exports = router;
  *               o2d_id: "O2D-4521"
  *               project_code: "AH-2026-002"
  *               sub_category: "Web Application"
+ *               tech_lead_emp_id: "AS00472"
+ *               project_manager_emp_id: "AS00717"
+ *               tech_stack_ids: [1, 4, 7]
  *             tasks:
  *               - pms_task_id: "1024"
  *                 emp_id: "AS00472"
@@ -702,6 +724,16 @@ module.exports = router;
  *                 o2d_id: "O2D-4521"
  *                 project_code: "AH-2026-002"
  *                 sub_category: "Web Application"
+ *                 tech_lead_emp_id: "AS00472"
+ *                 tech_lead_name: "Sarah J."
+ *                 project_manager_emp_id: "AS00717"
+ *                 project_manager_name: "Ravi K."
+ *                 tech_stack_ids: [1, 4]
+ *                 tech_stacks:
+ *                   - tech_stack_id: 1
+ *                     tech_stack_name: "Node.js"
+ *                   - tech_stack_id: 4
+ *                     tech_stack_name: "React"
  *                 created_at: "2026-09-19T10:15:00.000Z"
  *               task_info:
  *                 stats:
@@ -789,8 +821,16 @@ module.exports = router;
  *       - Single DB transaction across `project_info`, `task_info`,
  *         `effort_estimate`, `document_checklist` — if anything fails,
  *         nothing is changed
+ *       - **Each section is optional and only the sections present in the
+ *         body are applied.** The View screen's tabs (Project Info, Task
+ *         Info, Effort Details, Document Checklist) each save on their own
+ *         and send just their own section. A section that is not sent is
+ *         left untouched — in particular, `effort_estimates` is replaced
+ *         only when it is sent
  *       - `project_info`: plain UPDATE of only the locally-owned fields
- *         (project_type, nbd_id, o2d_id, project_code, sub_category)
+ *         (project_type, nbd_id, o2d_id, project_code, sub_category,
+ *         tech_lead_emp_id, project_manager_emp_id); `tech_stack_ids` is
+ *         saved when it is sent as an array
  *       - `tasks[]`: upsert per task, keyed by (project_info_id,
  *         pms_task_id) — insert-if-missing, update-if-exists. Only
  *         `emp_id`/`role`/`task_type`/`unit` are written, same as Create
@@ -850,6 +890,22 @@ module.exports = router;
  *                   sub_category:
  *                     type: string
  *                     example: "Web Application"
+ *                   tech_lead_emp_id:
+ *                     type: string
+ *                     nullable: true
+ *                     description: HRMS emp_id of the Tech Lead (pick from GET /import-project/employees). Only the id is stored; the name is read live from HRMS.
+ *                     example: "AS00472"
+ *                   project_manager_emp_id:
+ *                     type: string
+ *                     nullable: true
+ *                     description: HRMS emp_id of the Project Manager (pick from GET /import-project/employees)
+ *                     example: "AS00717"
+ *                   tech_stack_ids:
+ *                     type: array
+ *                     description: Selected Tech Stack ids (from GET /import-project/tech-stacks). Unknown or inactive ids are dropped; an empty array clears the selection.
+ *                     items:
+ *                       type: integer
+ *                     example: [1, 4, 7]
  *               tasks:
  *                 type: array
  *                 items:
@@ -918,6 +974,9 @@ module.exports = router;
  *               o2d_id: "O2D-4521"
  *               project_code: "AH-2026-002"
  *               sub_category: "Web Application"
+ *               tech_lead_emp_id: "AS00472"
+ *               project_manager_emp_id: "AS00717"
+ *               tech_stack_ids: [1, 4, 7]
  *             tasks:
  *               - pms_task_id: "1024"
  *                 emp_id: "AS00472"
@@ -961,4 +1020,101 @@ module.exports = router;
  *
  *       500:
  *         $ref: '#/components/responses/InternalServerError'
+ */
+
+/**
+ * @swagger
+ * /import-project/tech-stacks:
+ *   get:
+ *     summary: Tech Stack options (Project Info multi-select)
+ *     description: Active rows of `tech_stack_master`, sorted by name. The selected ids are sent as `project_info.tech_stack_ids`.
+ *     tags: [Import Project]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Tech stacks retrieved successfully
+ *         content:
+ *           application/json:
+ *             example:
+ *               techStacks:
+ *                 - tech_stack_id: 1
+ *                   tech_stack_name: "Node.js"
+ *                 - tech_stack_id: 4
+ *                   tech_stack_name: "React"
+ *       401:
+ *         $ref: '#/components/responses/UnauthorizedError'
+ *       500:
+ *         $ref: '#/components/responses/InternalServerError'
+ */
+
+/**
+ * @swagger
+ * /import-project/employees:
+ *   get:
+ *     summary: Active employees (Tech Lead, Project Manager and Effort Estimate members)
+ *     description: Active employees read live from HRMS, sorted by name. Entries without an id or name are dropped.
+ *     tags: [Import Project]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Employees retrieved successfully
+ *         content:
+ *           application/json:
+ *             example:
+ *               employees:
+ *                 - emp_id: "AS00472"
+ *                   emp_name: "Sarah J."
+ *                 - emp_id: "AS00717"
+ *                   emp_name: "Ravi K."
+ *       401:
+ *         $ref: '#/components/responses/UnauthorizedError'
+ *       500:
+ *         $ref: '#/components/responses/InternalServerError'
+ */
+
+/**
+ * @swagger
+ * /import-project/project-types:
+ *   get:
+ *     summary: Project Type options
+ *     description: The allowed project types are constants in the backend (`src/constants/projectTypes.js`), not a DB table.
+ *     tags: [Import Project]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Project types retrieved successfully
+ *         content:
+ *           application/json:
+ *             example:
+ *               projectTypes: ["One Time Project", "Managed Service", "Staff Augmentation"]
+ *               defaultProjectType: "One Time Project"
+ *       401:
+ *         $ref: '#/components/responses/UnauthorizedError'
+ */
+
+/**
+ * @swagger
+ * /import-project/me:
+ *   get:
+ *     summary: Logged-in user's name
+ *     description: Resolves the name from the token's emp_id via HRMS, so the "Uploaded by" preview matches what is saved.
+ *     tags: [Import Project]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Current user retrieved successfully
+ *         content:
+ *           application/json:
+ *             example:
+ *               emp_id: "AS00472"
+ *               emp_name: "Sarah J."
+ *       401:
+ *         description: Token has no emp_id
+ *         content:
+ *           application/json:
+ *             example: { message: "No emp_id on token" }
  */
