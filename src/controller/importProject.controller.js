@@ -529,6 +529,49 @@ const getProjectTypes = (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────
+// GET /api/import-project/tech-stacks
+// Step 1 / Project Info's multi-select "Tech Stack" dropdown, from tech_stack_master.
+// ─────────────────────────────────────────────────────────────────────────
+const getTechStacks = async (req, res, next) => {
+  try {
+    const techStacks = await query(
+      `SELECT tech_stack_id, tech_stack_name
+         FROM tech_stack_master
+        WHERE is_active = 1
+        ORDER BY tech_stack_name ASC`,
+    );
+    return res.status(200).json({ techStacks });
+  } catch (err) {
+    return next(err);
+  }
+};
+
+// Turns the ids sent by the frontend into the comma-separated string stored in
+// project_info.tech_stack_ids. Only ids that exist (and are active) in tech_stack_master are kept,
+// so a stale/forged id can never be stored. Returns null when nothing is selected.
+async function normalizeTechStackIds(techStackIds) {
+  const ids = [
+    ...new Set(
+      (Array.isArray(techStackIds) ? techStackIds : [])
+        .map((v) => Number(v))
+        .filter((v) => Number.isInteger(v) && v > 0),
+    ),
+  ];
+  if (ids.length === 0) return null;
+
+  // One placeholder per id: `query` uses prepared statements (execute), which don't expand an
+  // array bound to a single `IN (?)`.
+  const valid = await query(
+    `SELECT tech_stack_id FROM tech_stack_master
+      WHERE is_active = 1 AND tech_stack_id IN (${ids.map(() => "?").join(",")})`,
+    ids,
+  );
+  const kept = new Set(valid.map((r) => r.tech_stack_id));
+  const out = ids.filter((id) => kept.has(id));
+  return out.length ? out.join(",") : null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // GET /api/import-project/documents
 // Step 4 (Document Checklist) shows the fixed set of 16 document types
 // (BRD or CR, Proposal Document, ... GIT Repository Link) from
@@ -583,8 +626,16 @@ const createProjectInfo = async (req, res, next) => {
     return res.status(400).json({ message: "pms_project_id is required" });
   }
 
-  const { project_type, nbd_id, o2d_id, project_code, sub_category } =
-    project_info;
+  const {
+    project_type,
+    nbd_id,
+    o2d_id,
+    project_code,
+    sub_category,
+    tech_lead_emp_id,
+    project_manager_emp_id,
+    tech_stack_ids,
+  } = project_info;
 
   const uploadedBy = req.user?.emp_id || null;
 
@@ -598,8 +649,9 @@ const createProjectInfo = async (req, res, next) => {
     // read live from PMS's projectDetails at read-time instead.
     const [projectResult] = await connection.execute(
       `INSERT INTO project_info
-         (project_id, project_title, project_type, nbd_id, o2d_id, project_code, sub_category)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         (project_id, project_title, project_type, nbd_id, o2d_id, project_code, sub_category,
+          tech_lead_emp_id, project_manager_emp_id, tech_stack_ids)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         pms_project_id,
         pms_project_title || null,
@@ -608,6 +660,9 @@ const createProjectInfo = async (req, res, next) => {
         o2d_id || null,
         project_code || null,
         sub_category || null,
+        tech_lead_emp_id || null,
+        project_manager_emp_id || null,
+        await normalizeTechStackIds(tech_stack_ids),
       ],
     );
 
@@ -873,7 +928,7 @@ const getProjectView = async (req, res, next) => {
 
     const projectRows = await query(
       `SELECT project_info_id, project_id, project_title, project_type, nbd_id, o2d_id,
-              project_code, sub_category, created_at
+              project_code, sub_category, tech_lead_emp_id, project_manager_emp_id, tech_stack_ids, created_at
          FROM project_info
         WHERE project_info_id = ?`,
       [projectInfoId],
@@ -952,6 +1007,10 @@ const getProjectView = async (req, res, next) => {
       o2d_id: project.o2d_id,
       project_code: project.project_code,
       sub_category: project.sub_category,
+      tech_lead_emp_id: project.tech_lead_emp_id || null,
+      project_manager_emp_id: project.project_manager_emp_id || null,
+      // tech_lead_name / project_manager_name / tech_stacks are filled in below, once the HRMS
+      // name map and the project's tech stack rows have been read.
       created_at: project.created_at,
     };
 
@@ -1082,6 +1141,31 @@ const getProjectView = async (req, res, next) => {
     // as PMS-owned data. The project-wide total (overall_total_hours) is just SUM(total_hours)
     // computed here, not a separately stored/maintained value.
     const empNameMap = await getEmployeeNameMapFromHRMS();
+
+    // Project Info tab: Tech Lead / Project Manager names (live from HRMS, only the emp_id is
+    // stored) and the project's Tech Stack selections (from tech_stack_master).
+    projectInfoTab.tech_lead_name = projectInfoTab.tech_lead_emp_id
+      ? empNameMap.get(String(projectInfoTab.tech_lead_emp_id)) || null
+      : null;
+    projectInfoTab.project_manager_name = projectInfoTab.project_manager_emp_id
+      ? empNameMap.get(String(projectInfoTab.project_manager_emp_id)) || null
+      : null;
+    const savedTechStackIds = String(project.tech_stack_ids || "")
+      .split(",")
+      .map((v) => Number(v))
+      .filter((v) => Number.isInteger(v) && v > 0);
+    const techStackRows = savedTechStackIds.length
+      ? await query(
+          `SELECT tech_stack_id, tech_stack_name
+             FROM tech_stack_master
+            WHERE tech_stack_id IN (${savedTechStackIds.map(() => "?").join(",")})
+            ORDER BY tech_stack_name ASC`,
+          savedTechStackIds,
+        )
+      : [];
+    projectInfoTab.tech_stacks = techStackRows;
+    projectInfoTab.tech_stack_ids = savedTechStackIds;
+
     const effortRowsRaw = await query(
       `SELECT ee.emp_id, ee.role, ee.effort_days, ee.effort_hours,
               ee.buffer_days, ee.buffer_hours, ee.total_hours
@@ -1423,8 +1507,27 @@ const updateProjectInfo = async (req, res, next) => {
     documents = [],
   } = req.body || {};
 
-  const { project_type, nbd_id, o2d_id, project_code, sub_category } =
-    project_info;
+  // Each section is only touched when the client actually sent it, so a single tab (Project Info,
+  // Task Info, Effort Details or Documents Checklist) can save on its own without wiping the
+  // others — most importantly, effort_estimate is a full replace and must never run unless the
+  // Effort tab's rows were sent. The Import wizard and older clients send every section, so
+  // their behaviour is unchanged.
+  const body = req.body || {};
+  const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
+  const touchProjectInfo = has("project_info");
+  const touchEffort =
+    has("effort_estimates") && Array.isArray(effort_estimates);
+
+  const {
+    project_type,
+    nbd_id,
+    o2d_id,
+    project_code,
+    sub_category,
+    tech_lead_emp_id,
+    project_manager_emp_id,
+    tech_stack_ids,
+  } = project_info;
 
   const uploadedBy = req.user?.emp_id || null;
 
@@ -1444,22 +1547,35 @@ const updateProjectInfo = async (req, res, next) => {
     }
 
     // ── project_info ─────────────────────────────────────────────────────
-    await connection.execute(
-      `UPDATE project_info
-          SET project_type = ?, nbd_id = ?, o2d_id = ?, project_code = ?, sub_category = ?
+    if (touchProjectInfo)
+      await connection.execute(
+        `UPDATE project_info
+          SET project_type = ?, nbd_id = ?, o2d_id = ?, project_code = ?, sub_category = ?,
+              tech_lead_emp_id = ?, project_manager_emp_id = ?
         WHERE project_info_id = ?`,
-      [
-        project_type || null,
-        nbd_id || null,
-        o2d_id || null,
-        project_code || null,
-        sub_category || null,
-        projectInfoId,
-      ],
-    );
+        [
+          project_type || null,
+          nbd_id || null,
+          o2d_id || null,
+          project_code || null,
+          sub_category || null,
+          tech_lead_emp_id || null,
+          project_manager_emp_id || null,
+          projectInfoId,
+        ],
+      );
+
+    // Only touched when the frontend sends the field, so an older client that doesn't know
+    // about Tech Stack can never wipe a project's saved selections.
+    if (touchProjectInfo && Array.isArray(tech_stack_ids)) {
+      await connection.execute(
+        `UPDATE project_info SET tech_stack_ids = ? WHERE project_info_id = ?`,
+        [await normalizeTechStackIds(tech_stack_ids), projectInfoId],
+      );
+    }
 
     // ── task_info (upsert) ───────────────────────────────────────────────
-    for (const task of tasks) {
+    for (const task of Array.isArray(tasks) ? tasks : []) {
       const { pms_task_id, emp_id, role, task_type, unit } = task;
 
       if (!pms_task_id) {
@@ -1486,12 +1602,13 @@ const updateProjectInfo = async (req, res, next) => {
     }
 
     // ── effort_estimate (full replace) ──────────────────────────────────
-    await connection.execute(
-      `DELETE FROM effort_estimate WHERE project_info_id = ?`,
-      [projectInfoId],
-    );
+    if (touchEffort)
+      await connection.execute(
+        `DELETE FROM effort_estimate WHERE project_info_id = ?`,
+        [projectInfoId],
+      );
 
-    for (const estimate of effort_estimates) {
+    for (const estimate of touchEffort ? effort_estimates : []) {
       const { emp_id, role, effort_days, buffer_days } = estimate;
 
       if (!emp_id || !role) {
@@ -1529,7 +1646,7 @@ const updateProjectInfo = async (req, res, next) => {
     // unique key, so re-submitting the same custom document name on a later edit currently
     // inserts a new row rather than updating the old one. Fine for now (nothing edits a custom
     // document's link yet), but worth a real dedupe key (e.g. on document_name) if that's added.
-    for (const doc of documents) {
+    for (const doc of Array.isArray(documents) ? documents : []) {
       const { document_id, document_name, sharepoint_url } = doc;
 
       if (!sharepoint_url || (!document_id && !document_name)) {
@@ -1604,6 +1721,7 @@ module.exports = {
   getActiveEmployees,
   getCurrentUser,
   getProjectTypes,
+  getTechStacks,
   getDocumentMaster,
   createProjectInfo,
   updateProjectInfo,

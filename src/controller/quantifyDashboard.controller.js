@@ -46,61 +46,120 @@ function normalizeTaskStatus(rawStatus) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Classifies ONE project's live PMS status + planned_end_date into the
-// buckets the Dashboard widgets need. Loose contains-match on the status
-// string, plus one hard rule confirmed directly by the user for "Delayed":
-// a project is delayed if its planned_end_date has already passed and it
-// isn't Completed — this overrides whatever literal status PMS sends, so
-// "Delayed" always means the same thing everywhere it appears on the
-// Dashboard.
+// Classifies ONE imported project into the dashboard's buckets from its PMS tasks, dates and
+// status. Rules, first match wins:
 //
-// "At Risk" is NOT implemented yet — the threshold for it (how close to
-// the deadline / how far behind completion counts as at-risk) hasn't been
-// decided yet, so every non-completed/non-delayed/non-on-hold project
-// currently falls through to "On Track" (health overview) / "Active"
-// (status distribution). Revisit once that threshold is confirmed.
+//   Completed   every task is COMPLETED (even if that happened after the planned end date), or
+//               PMS itself says the project is complete.
+//   Delayed     not completed, and the planned end date has passed.
+//   At Risk     not completed, not yet delayed, and the planned end date is within the next
+//               AT_RISK_DAYS days (today counts).
+//   On Track    otherwise, when the share of tasks completed is at least the share of the
+//               planned timeline that has passed (50% done at the halfway point = On Track).
+//   In Progress otherwise: work has started but is behind that pace.
+//
+// A project with no tasks, or no usable dates, can't be judged on pace, so it falls back to the
+// PMS status text: "progress" → In Progress, anything else → On Track.
+// On Hold / Inactive projects are never At Risk (they only feed the Status Distribution donut).
 // ─────────────────────────────────────────────────────────────────────────
-function classifyProjectStatus(rawStatus, plannedEndDate) {
+const AT_RISK_DAYS = 3;
+
+// Whole-day number for a PMS date ("2026-10-30" or "2026-10-30T00:00:00.000Z" → its calendar
+// day), so comparisons ignore time of day and time zones. null when the value isn't a date.
+function dayNumber(value) {
+  if (!value) return null;
+  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) return Date.UTC(+match[1], +match[2] - 1, +match[3]) / 86400000;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return (
+    Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000
+  );
+}
+
+function classifyProject({
+  rawStatus,
+  plannedStartDate,
+  plannedEndDate,
+  tasks,
+}) {
   const status = String(rawStatus || "").toLowerCase();
+  const taskList = Array.isArray(tasks) ? tasks : [];
+  const totalTasks = taskList.length;
+  const completedTasks = taskList.filter(
+    (t) => normalizeTaskStatus(t.status) === "completed",
+  ).length;
 
-  const completed = status.includes("complete") || status.includes("done");
+  const completed =
+    (totalTasks > 0 && completedTasks === totalTasks) ||
+    status.includes("complete") ||
+    status.includes("done");
 
-  let pastDue = false;
-  if (plannedEndDate) {
-    const endDate = new Date(plannedEndDate);
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    pastDue = !Number.isNaN(endDate.getTime()) && endDate < todayStart;
+  const now = new Date();
+  const today =
+    Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) / 86400000;
+
+  // Planned start: the project's own date, else the earliest planned task start
+  let startDay = dayNumber(plannedStartDate);
+  if (startDay === null) {
+    const taskStarts = taskList
+      .map((t) => dayNumber(t.planned_start_date))
+      .filter((d) => d !== null);
+    startDay = taskStarts.length ? Math.min(...taskStarts) : null;
   }
+  const endDay = dayNumber(plannedEndDate);
 
-  const delayed = !completed && (pastDue || status.includes("delay"));
+  const delayed = !completed && endDay !== null && endDay < today;
   const onHold =
     !completed &&
     !delayed &&
     (status.includes("hold") || status.includes("inactive"));
-  const inProgressLiteral =
-    !completed && !delayed && !onHold && status.includes("progress");
-  // "Active" = anything not completed/delayed/on-hold, for the Status
-  // Distribution donut's catch-all slice (covers inProgressLiteral + any
-  // other unmatched literal status).
-  const active = !completed && !delayed && !onHold;
 
-  return { completed, delayed, onHold, inProgressLiteral, active };
+  const atRisk =
+    !completed &&
+    !delayed &&
+    !onHold &&
+    endDay !== null &&
+    endDay - today <= AT_RISK_DAYS;
+
+  // Pace: share of tasks completed vs share of the planned timeline already used
+  let onTrack;
+  if (
+    totalTasks > 0 &&
+    startDay !== null &&
+    endDay !== null &&
+    endDay > startDay
+  ) {
+    const elapsed = Math.min(
+      Math.max((today - startDay) / (endDay - startDay), 0),
+      1,
+    );
+    onTrack = completedTasks / totalTasks >= elapsed;
+  } else {
+    onTrack = !status.includes("progress");
+  }
+
+  return {
+    completed,
+    delayed,
+    onHold,
+    atRisk,
+    onTrack: !completed && !delayed && !atRisk && onTrack,
+    inProgress: !completed && !delayed && !atRisk && !onTrack,
+  };
 }
 
-// Turns a classification into the single label the Health Overview bar
-// chart and the Delivery Performance table's STATUS column both use.
-// Priority order: Completed > Delayed > In Progress (literal) > On Track
-// (catch-all). At Risk is intentionally unreachable right now — see the
-// note on classifyProjectStatus above.
+// The single label the Health Overview chart, the dashboard cards and the Delivery Performance
+// STATUS column all use.
 function healthBucketLabel(classification) {
   if (classification.completed) return "Completed";
   if (classification.delayed) return "Delayed";
-  if (classification.inProgressLiteral) return "In Progress";
-  return "On Track";
+  if (classification.atRisk) return "At Risk";
+  if (classification.onTrack) return "On Track";
+  return "In Progress";
 }
 
-// Turns a classification into the Status Distribution donut's label.
+// The Status Distribution donut's label.
 function distributionBucketLabel(classification) {
   if (classification.completed) return "Completed";
   if (classification.delayed) return "Delayed";
@@ -249,38 +308,39 @@ const getDashboardOverview = async (req, res, next) => {
 
     const deliveryPerformance = localRows.map((row, index) => {
       const pmsProject = pmsByProjectId.get(String(row.project_id));
-      const rawStatus = pmsProject?.status || null;
-      const plannedEndDate = pmsProject?.planned_end_date || null;
 
-      const classification = classifyProjectStatus(rawStatus, plannedEndDate);
+      // This project's PMS tasks, when the fan-out call for it succeeded
+      const detailResult = detailResults[index];
+      const detail =
+        detailResult.status === "fulfilled" ? detailResult.value || {} : {};
+      const safeTasks = detail.tasksDetails || detail.data?.tasksDetails || [];
 
-      // Cards: In Progress here is the literal-status bucket only, same
-      // loose-match convention as everywhere else in this file.
-      if (classification.completed) cards.completed += 1;
-      else if (classification.delayed) cards.delayed += 1;
-      else if (classification.inProgressLiteral) cards.in_progress += 1;
+      const classification = classifyProject({
+        rawStatus: pmsProject?.status || null,
+        plannedStartDate: pmsProject?.planned_start_date || null,
+        plannedEndDate: pmsProject?.planned_end_date || null,
+        tasks: safeTasks,
+      });
 
       const healthLabel = healthBucketLabel(classification);
       healthCounts[healthLabel] += 1;
 
+      // Cards use the same label as the Health Overview chart, so the numbers always agree
+      if (healthLabel === "Completed") cards.completed += 1;
+      else if (healthLabel === "Delayed") cards.delayed += 1;
+      else if (healthLabel === "In Progress") cards.in_progress += 1;
+
       const distributionLabel = distributionBucketLabel(classification);
       distributionCounts[distributionLabel] += 1;
 
-      // Completion % from this project's PMS milestones/tasks, when the
-      // fan-out call for it succeeded.
-      let completionPercentage = 0;
-      const detailResult = detailResults[index];
-      if (detailResult.status === "fulfilled") {
-        const { tasksDetails } = detailResult.value || {};
-        const safeTasks = tasksDetails || [];
-        const completedTasks = safeTasks.filter(
-          (t) => normalizeTaskStatus(t.status) === "completed",
-        ).length;
-        completionPercentage =
-          safeTasks.length === 0
-            ? 0
-            : Math.round((completedTasks / safeTasks.length) * 100);
-      }
+      // Completion % from this project's PMS tasks
+      const completedTasks = safeTasks.filter(
+        (t) => normalizeTaskStatus(t.status) === "completed",
+      ).length;
+      const completionPercentage =
+        safeTasks.length === 0
+          ? 0
+          : Math.round((completedTasks / safeTasks.length) * 100);
 
       return {
         project_info_id: row.project_info_id,
@@ -372,6 +432,7 @@ const getAllEmployeesUtilization = async (req, res) => {
          pi.project_info_id                               AS project_info_id,
          pi.project_id                                    AS pms_project_id,
          pi.project_code                                  AS project_code,
+         pi.project_title                                 AS stored_title,
          pi.sub_category                                  AS project_category_code,
          COALESCE(ta.assigned_task_count, 0)              AS assigned_task_count,
          COALESCE(ta.assigned_units,      0)              AS assigned_units,
@@ -416,6 +477,28 @@ const getAllEmployeesUtilization = async (req, res) => {
       empIds,
     );
 
+    // Live project titles from PMS (one call, best-effort). Falls back to the title stored at
+    // import time when PMS can't be reached or no longer lists the project.
+    const pmsTitleById = new Map();
+    const titleToken = getUatToken(req.user?.emp_id);
+    if (titleToken) {
+      try {
+        extractProjects(
+          await pmsGet(titleToken, "/api/pms/getAllProjects"),
+        ).forEach((p) =>
+          pmsTitleById.set(
+            String(p.project_id || p.id),
+            p.project_title || p.title || null,
+          ),
+        );
+      } catch (pmsErr) {
+        console.error(
+          "Employee utilization: PMS titles failed:",
+          pmsErr.message,
+        );
+      }
+    }
+
     const byEmployee = new Map();
 
     for (const r of rows) {
@@ -452,6 +535,8 @@ const getAllEmployeesUtilization = async (req, res) => {
         project_info_id: r.project_info_id,
         pms_project_id: r.pms_project_id,
         project_code: r.project_code,
+        project_title:
+          pmsTitleById.get(String(r.pms_project_id)) || r.stored_title || null,
         project_category_code: r.project_category_code,
 
         // Kept for any existing caller still reading a single `role` string (first role, same
@@ -569,8 +654,9 @@ const getEmployeeUtilization = async (req, res) => {
          pi.project_info_id,
          pi.project_id            AS pms_project_id,
          pi.project_code,
+         pi.project_title         AS stored_title,
          pi.sub_category,
-    
+
          COALESCE(t.assigned_task_count, 0) AS assigned_task_count,
          COALESCE(t.assigned_units,      0) AS assigned_units,
          COALESCE(e.assigned_days,       0) AS assigned_days,
@@ -628,11 +714,14 @@ const getEmployeeUtilization = async (req, res) => {
     const enriched = await Promise.all(
       rows.map(async (p) => {
         let tasks = [];
+        let liveTitle = null;
         try {
           const raw = await pmsGet(uatToken, "/api/pms/getProjectDetails", {
             projectId: p.pms_project_id,
           });
           ({ tasks } = extractProjectDetails(raw));
+          const details = raw?.projectDetails || raw?.data?.projectDetails;
+          liveTitle = details?.project_title || details?.title || null;
         } catch (err) {
           console.warn(
             `⚠️ PMS fetch failed for project ${p.pms_project_id}:`,
@@ -672,6 +761,8 @@ const getEmployeeUtilization = async (req, res) => {
           project_info_id: p.project_info_id,
           pms_project_id: p.pms_project_id,
           project_code: p.project_code,
+          // Live PMS title, falling back to the title stored at import time
+          project_title: liveTitle || p.stored_title || null,
           project_category_code: p.sub_category,
 
           // Kept for any existing caller still reading a single `role` string — `roles` below is
