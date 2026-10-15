@@ -1337,6 +1337,62 @@ const getProjectView = async (req, res, next) => {
       m.pending = st.pending;
       m.units = st.units;
     }
+
+    // Also surface PMS-assigned employees who have real tasks on this project but haven't been
+    // added to Effort Estimate yet — otherwise a project with live PMS work in progress shows
+    // "No team members assigned yet." on Overview, which isn't accurate. Grouped by the same
+    // identity scheme used above (pms_emp_id when PMS gives one, else the raw assignee name),
+    // skipping anyone already covered via effort_estimate. alloc_hours stays 0 (nothing
+    // allocated yet, not unknown) and fills in once someone adds them to Effort Estimate —
+    // effort_estimate rows are built first above, so this only ever fills a gap, never
+    // overwrites one.
+    const pmsOnlyByIdentity = new Map(); // key: same id:/name: scheme as taskStatsByAssignee
+    for (const t of allTasks) {
+      const key =
+        t.pms_emp_id != null && t.pms_emp_id !== ""
+          ? `id:${normName(t.pms_emp_id)}`
+          : t.owner
+            ? `name:${normName(t.owner)}`
+            : null;
+      if (!key) continue;
+      if (!pmsOnlyByIdentity.has(key)) {
+        pmsOnlyByIdentity.set(key, {
+          emp_id: t.pms_emp_id ?? null,
+          emp_name: empNameMap.get(String(t.pms_emp_id)) || t.owner || null,
+          stats: { tasks: 0, done: 0, pending: 0, units: 0 },
+        });
+      }
+      const entry = pmsOnlyByIdentity.get(key);
+      entry.stats.tasks += 1;
+      entry.stats.units += Number(t.unit) || 0;
+      if (normalizeTaskStatus(t.status) === "completed") entry.stats.done += 1;
+      else entry.stats.pending += 1;
+    }
+    for (const { emp_id, emp_name, stats } of pmsOnlyByIdentity.values()) {
+      // Skip if this person is already covered via an effort_estimate row, matched the same
+      // way (id or name) the rest of this function does — nobody already counted above gets a
+      // duplicate, lower-detail row here.
+      const already = [...teamMembersMap.values()].some(
+        (m) =>
+          (emp_id != null && normName(m.emp_id) === normName(emp_id)) ||
+          (emp_name != null && normName(m.emp_name) === normName(emp_name)),
+      );
+      if (already) continue;
+      teamMembersMap.set(emp_id != null ? emp_id : `name:${emp_name}`, {
+        emp_id,
+        emp_name,
+        role: null,
+        roles: [],
+        roleStats: [],
+        alloc_hours: 0,
+        logged_hours: loggedHoursByEmpId.get(String(emp_id)) || 0,
+        tasks: stats.tasks,
+        done: stats.done,
+        pending: stats.pending,
+        units: stats.units,
+      });
+    }
+
     const team_members = [...teamMembersMap.values()].map(
       ({ roleStats, ...m }) => ({
         ...m,
