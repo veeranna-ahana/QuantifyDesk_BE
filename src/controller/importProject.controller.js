@@ -1,7 +1,8 @@
-const { query, quantifyPool, ahanaPilotQuery } = require("../config/db");
+const { query, quantifyPool } = require("../config/db");
 const { getUatToken } = require("../../helpers/pmsTokenStore");
 const {
   pmsGet,
+  pmsPost,
   extractProjects,
   normalizePMSError,
 } = require("../../helpers/pmsHelper");
@@ -163,46 +164,69 @@ function computeEffortHours(effortDays, bufferDays) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Mirrors role/task_type/unit into PMS's own DB (ahana_pilot.milestone_tasks), keyed by
-// task_id (PMS's own task id — the same value we store as task_info.task_id / send as
-// pms_task_id). This is a SEPARATE database/server from quantify, so it can't join the
-// quantify transaction — it's written best-effort right after the quantify commit succeeds.
-// A failure here does NOT fail the request (our own DB already has the authoritative data),
-// but every failure is collected and returned to the caller as `pms_sync_warnings`, never
-// silently swallowed — same "never hide a failure behind an empty/default value" rule as the
-// Daily Report fetchError flag.
+// Mirrors role/task_type/unit into PMS, via PMS's own HTTP API — POST
+// /api/pms/updateMilestoneTask, one call per task: { task_id, role, task_type, unit }.
+//
+// This REPLACES the previous design, which wrote directly into PMS's own database
+// (ahana_pilot.milestone_tasks) over a raw SQL connection this app held credentials for. That
+// DB dependency is gone entirely now — db.js no longer has an ahana_pilot pool at all. This
+// goes through the exact same PMS call pattern every other PMS integration in this app uses:
+// pmsHelper.js's pmsPost, authenticated with the UAT token cached at login (same as pms-sync,
+// getProjectView, etc.) — never a direct DB connection to a system we don't own.
+//
+// Still best-effort, written right after the quantify commit succeeds (a separate system, so
+// it can't join the quantify transaction): a failure here does NOT fail the request (our own
+// DB already has the authoritative data), but every failure is collected and returned to the
+// caller as `pms_sync_warnings`, never silently swallowed — same "never hide a failure behind
+// an empty/default value" rule as the Daily Report fetchError flag.
+//
+// `uatToken` must be resolved by the caller (via getUatToken(req.user?.emp_id)) — if it's
+// missing (no cached PMS session), every task is reported as unsynced rather than attempting
+// calls that would just 401, but Create/Edit Project itself still succeeds regardless.
 // ─────────────────────────────────────────────────────────────────────────
-async function syncTasksToAhanaPilot(tasks) {
-  const warnings = [];
+async function syncTasksToAhanaPilot(uatToken, tasks) {
+  const tasksToSync = tasks.filter((t) => t.pms_task_id);
 
-  for (const task of tasks) {
-    const { pms_task_id, role, task_type, unit } = task;
-    if (!pms_task_id) continue;
-
-    try {
-      const result = await ahanaPilotQuery(
-        `UPDATE milestone_tasks
-            SET role = ?, task_type = ?, unit = ?
-          WHERE task_id = ?`,
-        [role || null, task_type || null, unit || null, pms_task_id],
-      );
-      if (!result || result.affectedRows === 0) {
-        warnings.push(
-          `PMS task_id ${pms_task_id}: no matching row in ahana_pilot.milestone_tasks — role/task_type/unit not mirrored to PMS.`,
-        );
-      }
-    } catch (err) {
-      console.error(
-        `Error mirroring task ${pms_task_id} to ahana_pilot.milestone_tasks:`,
-        err.message,
-      );
-      warnings.push(
-        `PMS task_id ${pms_task_id}: failed to update ahana_pilot.milestone_tasks (${err.message}).`,
-      );
-    }
+  if (!uatToken) {
+    return tasksToSync.map(
+      (t) =>
+        `PMS task_id ${t.pms_task_id}: no PMS session available — role/task_type/unit not synced to PMS.`,
+    );
   }
 
-  return warnings;
+  // Run every task's PMS call concurrently rather than one-at-a-time. This used to be a
+  // sequential for-await loop; with a real HTTP round-trip per task (instead of the old raw
+  // SQL UPDATE) that meant total time grew with the task count, and on a project with many
+  // tasks it could push Create/Update Project's response past the frontend's 10s axios timeout
+  // even though the save itself had already succeeded. Promise.allSettled keeps the same
+  // best-effort/never-throws behaviour (one task's failure doesn't affect another's, and never
+  // fails the request) while bounding total time to roughly the slowest single call instead of
+  // the sum of all of them.
+  const results = await Promise.allSettled(
+    tasksToSync.map((task) => {
+      const { pms_task_id, role, task_type, unit } = task;
+      return pmsPost(uatToken, "/api/pms/updateMilestoneTask", {
+        task_id: pms_task_id,
+        role: role || null,
+        task_type: task_type || null,
+        unit: unit || null,
+      }).then(
+        () => null,
+        (err) => {
+          console.error(
+            `Error syncing task ${pms_task_id} to PMS (updateMilestoneTask):`,
+            err.message,
+          );
+          return `PMS task_id ${pms_task_id}: failed to sync to PMS (${err.message}).`;
+        },
+      );
+    }),
+  );
+
+  // Promise.allSettled never rejects, and every mapped promise above already resolves (not
+  // rejects) with either null (success) or a warning string — so each result here is always
+  // { status: "fulfilled", value: null | string }. No `.reason`/"rejected" branch is needed.
+  return results.map((r) => r.value).filter(Boolean);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -576,7 +600,7 @@ async function normalizeTechStackIds(techStackIds) {
 // Step 4 (Document Checklist) shows the fixed set of 16 document types
 // (BRD or CR, Proposal Document, ... GIT Repository Link) from
 // document_master — the master/reference list, not project-specific.
-// Each row here just becomes a "Pending" checklist entry on the frontend
+// Each row here just becomes an unset ("—") checklist entry on the frontend
 // until the user adds a SharePoint link for it (that link is what gets
 // persisted per-project, into document_checklist, on Create Project).
 // ─────────────────────────────────────────────────────────────────────────
@@ -605,7 +629,7 @@ const getDocumentMaster = async (req, res, next) => {
 //     (that's a later upsert-style "Edit Task Details" endpoint)
 //   - effort_estimate: role/effort rows for Step 3
 //   - document_checklist: only rows where a sharepoint_url was actually
-//     provided — an unfilled document just stays "Pending" and gets no
+//     provided — an unfilled document just stays unset ("—") and gets no
 //     row until the user adds a link (via this API on create, or the
 //     future edit/upsert endpoint)
 //
@@ -739,7 +763,7 @@ const createProjectInfo = async (req, res, next) => {
       const { document_id, document_name, sharepoint_url } = doc;
 
       if (!sharepoint_url || (!document_id && !document_name)) {
-        continue; // no link yet -> stays "Pending" on the frontend, no row needed
+        continue; // no link yet -> stays unset ("—") on the frontend, no row needed
       }
 
       await connection.execute(
@@ -758,10 +782,12 @@ const createProjectInfo = async (req, res, next) => {
 
     await connection.commit();
 
-    // Mirror role/task_type/unit into PMS's own DB — best-effort, after our own commit has
-    // already succeeded (see syncTasksToAhanaPilot's comment for why this can't be part of
-    // the same transaction).
-    const pmsSyncWarnings = await syncTasksToAhanaPilot(tasks);
+    // Mirror role/task_type/unit into PMS, via PMS's own API — best-effort, after our own
+    // commit has already succeeded (see syncTasksToAhanaPilot's comment for why this can't be
+    // part of the same transaction). Resolve the UAT token the same way every other PMS call
+    // in this controller does.
+    const uatToken = getUatToken(req.user?.emp_id);
+    const pmsSyncWarnings = await syncTasksToAhanaPilot(uatToken, tasks);
 
     return res.status(201).json({
       message: "Project imported successfully",
@@ -1474,7 +1500,7 @@ const getProjectView = async (req, res, next) => {
 
     // ── Document Checklist tab ──────────────────────────────────────────
     // LEFT JOIN so every one of the 16 document_master rows shows up even
-    // when nothing has been linked yet for this project ("Pending").
+    // when nothing has been linked yet for this project (unset, "—").
     // uploaded_by is stored as an emp_id (whoever was logged in when the link was added,
     // from req.user.emp_id) — never a name — and resolved live from HRMS (empNameMap, fetched
     // once above), not master.emp, same principle as effort_estimate's emp_name.
@@ -1506,7 +1532,9 @@ const getProjectView = async (req, res, next) => {
         document_id: doc.document_id,
         document_name: doc.document_name,
         sharepoint_url: doc.sharepoint_url || null,
-        status: doc.status || "Pending",
+        // doc.status is NULL only when the LEFT JOIN found no document_checklist row — i.e.
+        // nothing has been linked yet. "—" (not the word "Pending") for a genuinely unset value.
+        status: doc.status || "—",
         uploaded_by: empNameMap.get(String(doc.uploaded_by_emp_id)) || null,
         uploaded_date: doc.uploaded_date || null,
       })),
@@ -1514,7 +1542,11 @@ const getProjectView = async (req, res, next) => {
         document_id: null,
         document_name: doc.custom_document_name,
         sharepoint_url: doc.sharepoint_url || null,
-        status: doc.status || "Uploaded",
+        // Same fix — this query already filters to rows that exist in document_checklist, so
+        // doc.status should always be set, but if it were ever unexpectedly empty, "—" is
+        // honest; the old "Uploaded" fallback would have claimed a document was uploaded when
+        // we didn't actually know that.
+        status: doc.status || "—",
         uploaded_by: empNameMap.get(String(doc.uploaded_by_emp_id)) || null,
         uploaded_date: doc.uploaded_date || null,
       })),
@@ -1732,7 +1764,8 @@ const updateProjectInfo = async (req, res, next) => {
 
     // Same best-effort mirror as Create Project — covers both single-task edit (tasks.length
     // === 1) and bulk edit (tasks.length > 1), since both go through this one endpoint/loop.
-    const pmsSyncWarnings = await syncTasksToAhanaPilot(tasks);
+    const uatToken = getUatToken(req.user?.emp_id);
+    const pmsSyncWarnings = await syncTasksToAhanaPilot(uatToken, tasks);
 
     return res.status(200).json({
       message: "Project updated successfully",

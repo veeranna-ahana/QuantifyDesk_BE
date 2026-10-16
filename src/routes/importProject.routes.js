@@ -68,7 +68,7 @@ router.get("/tech-stacks", authMiddleware, getTechStacks);
 
 // ── Step 4: Document Checklist ──────────────────────────────────────────
 // GET /api/import-project/documents — the fixed 16-row document_master
-// list, rendered as "Pending" checklist entries until the user adds a
+// list, rendered as "—" checklist entries until the user adds a
 // SharePoint link for each.
 router.get("/documents", authMiddleware, getDocumentMaster);
 
@@ -335,6 +335,102 @@ module.exports = router;
 
 /**
  * @swagger
+ * /import-project/pms-task-overlay:
+ *   get:
+ *     summary: PMS pull — role/task_type/unit overlay for a project's tasks
+ *     description: |
+ *       Called by the PMS team's own server (not a logged-in app user) to read the
+ *       role/task_type/unit values set in this app's Task Info / Edit Task Details screen,
+ *       keyed by PMS's own project_id and task_id.
+ *
+ *       ### Why this exists:
+ *       This replaces a previous design where this app wrote role/task_type/unit directly
+ *       into PMS's own database (`ahana_pilot.milestone_tasks`) right after every Create/Edit
+ *       Project. That push-based mirror has been removed — this app no longer holds or needs
+ *       any credentials for PMS's database. PMS now pulls the same data from us instead,
+ *       through this endpoint, whenever it needs it.
+ *
+ *       ### Key Features:
+ *       - Resolves `projectId` (PMS's project_id) to our internal `project_info_id`, then reads
+ *         `task_info` rows for that project
+ *       - `taskId` (optional) narrows the result to a single task
+ *       - Only `role`/`task_type`/`unit` are returned — the exact same 3 fields the old
+ *         push-based mirror used to write, nothing more
+ *       - A task nobody has set a Role/Task Type/Unit for yet (no `task_info` row at all) is
+ *         simply left out of `tasks[]`, rather than returned with fabricated/guessed nulls
+ *
+ *       ### Authentication:
+ *       NOT the normal app JWT (`authMiddleware`) — this is a service-to-service call from
+ *       PMS's own server. Requires a shared secret in the `X-API-Key` header, matching the
+ *       `PMS_SYNC_API_KEY` environment variable. Coordinate the actual key value with the PMS
+ *       team out of band (never commit it); if PMS already has a different service-to-service
+ *       auth convention (mTLS, OAuth client credentials, IP allowlisting), this scheme can be
+ *       swapped for that instead.
+ *
+ *     tags: [Import Project]
+ *     security:
+ *       - apiKeyAuth: []
+ *
+ *     parameters:
+ *       - in: query
+ *         name: projectId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: PMS project ID
+ *         example: "2"
+ *       - in: query
+ *         name: taskId
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: PMS task ID, to narrow the result to one task
+ *         example: "1024"
+ *
+ *     responses:
+ *       200:
+ *         description: Role/task_type/unit overlay retrieved successfully
+ *         content:
+ *           application/json:
+ *             example:
+ *               project_id: "2"
+ *               tasks:
+ *                 - task_id: "1024"
+ *                   role: "BA"
+ *                   task_type: "Analysis"
+ *                   unit: 98
+ *                 - task_id: "1025"
+ *                   role: "FE Dev"
+ *                   task_type: "UI design/ Figma"
+ *                   unit: 40
+ *
+ *       400:
+ *         description: Bad Request - projectId missing
+ *         content:
+ *           application/json:
+ *             example:
+ *               message: "projectId (PMS project ID) is required"
+ *
+ *       401:
+ *         description: Unauthorized - missing or invalid X-API-Key
+ *         content:
+ *           application/json:
+ *             example:
+ *               message: "Invalid or missing API key."
+ *
+ *       404:
+ *         description: No imported project found for this PMS project ID
+ *         content:
+ *           application/json:
+ *             example:
+ *               message: "No imported project found for PMS project ID \"2\"."
+ *
+ *       500:
+ *         $ref: '#/components/responses/InternalServerError'
+ */
+
+/**
+ * @swagger
  * /import-project/roles:
  *   get:
  *     summary: Get Distinct Roles for Effort Estimate
@@ -399,8 +495,8 @@ module.exports = router;
  *       ### Key Features:
  *       - Returns all 16 document types, ordered by `document_id`
  *       - Backed entirely by our own DB — no PMS/external call involved
- *       - Powers Step 4 (Document Checklist): each row renders as a
- *         "Pending" entry until the user adds a SharePoint link for it
+ *       - Powers Step 4 (Document Checklist): each row renders as an
+ *         unset ("—") entry until the user adds a SharePoint link for it
  *
  *       ### Use Cases:
  *       - Populate the Document Checklist table on project import
@@ -474,9 +570,12 @@ module.exports = router;
  *         convenience only — it just sets the same values across multiple
  *         entries in `tasks[]` before submitting; no separate API for it
  *       - `documents[]` only needs entries the user actually linked; any
- *         document type left unlinked simply has no row and renders as
- *         "Pending" on the frontend
+ *         document type left unlinked simply has no row and renders
+ *         unset ("—") on the frontend
  *       - `tasks[]` and `effort_estimates[]` may both be empty arrays
+ *       - Role/task_type/unit set here are available to the PMS team via
+ *         `GET /import-project/pms-task-overlay` — this app no longer
+ *         writes that data into PMS's own database itself
  *
  *       ### Use Cases:
  *       - Final "Create Project" action on the Import Project wizard
@@ -682,7 +781,7 @@ module.exports = router;
  *         `effort_estimate` rows
  *       - `documents[]`: all 16 `document_master` rows, LEFT JOINed with
  *         this project's `document_checklist` rows — an unlinked document
- *         still shows up with `status: "Pending"` instead of being missing
+ *         still shows up, with `status: "—"` instead of being missing
  *       - If the PMS call fails, PMS-owned fields render null/empty rather
  *         than failing the whole view
  *
@@ -784,7 +883,7 @@ module.exports = router;
  *                 - document_id: 2
  *                   document_name: "Proposal Document"
  *                   sharepoint_url: null
- *                   status: "Pending"
+ *                   status: "—"
  *                   uploaded_by: null
  *                   uploaded_date: null
  *
@@ -847,6 +946,9 @@ module.exports = router;
  *         written/updated; requires a UNIQUE KEY on `document_checklist
  *         (project_info_id, document_id)`
  *       - 404 if `projectInfoId` doesn't exist in our DB
+ *       - Role/task_type/unit changed here are immediately reflected in
+ *         `GET /import-project/pms-task-overlay` — this app no longer
+ *         writes that data into PMS's own database itself
  *
  *       ### Authentication:
  *       This app's own Bearer token (not the PMS UAT token — no PMS call
