@@ -84,40 +84,20 @@ const projectCodeQuery = async (sql, params = []) => {
   }
 };
 
-// Ahana Pilot DB connection pool (PMS's own database — writes role/task_type/unit back into
-// PMS's milestone_tasks table whenever we set them on our side, so PMS reflects the same values).
-const ahanaPilotPool = mysql.createPool({
-  host: process.env.AHANA_PILOT_DB_HOST || process.env.DB_HOST,
-  user: process.env.AHANA_PILOT_DB_USER || process.env.DB_USER,
-  password: process.env.AHANA_PILOT_DB_PASSWORD || process.env.DB_PASSWORD,
-  database: process.env.AHANA_PILOT_DB_NAME || "ahana_pilot",
-  port: process.env.AHANA_PILOT_DB_PORT
-    ? Number(process.env.AHANA_PILOT_DB_PORT)
-    : 3306,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  dateStrings: true,
-});
-
-/**
- * Helper to run parameterized queries on the Ahana Pilot (PMS) DB.
- * @param {string} sql - SQL query string with placeholders.
- * @param {Array} [params] - Values for the placeholders.
- * @returns {Promise<any[]>} - Result rows.
- */
-const ahanaPilotQuery = async (sql, params = []) => {
-  const [rows] = await ahanaPilotPool.execute(sql, params);
-  return rows;
-};
+// NOTE: the Ahana Pilot (PMS) DB connection pool and ahanaPilotQuery helper that used to live
+// here have been removed. The app no longer writes role/task_type/unit directly into PMS's own
+// database (ahana_pilot.milestone_tasks) over a raw SQL connection this app held credentials
+// for — that created a hard dependency on having live DB credentials for a system we don't own.
+// Instead, syncTasksToAhanaPilot (importProject.controller.js) now calls PMS's own HTTP API —
+// POST /api/pms/updateMilestoneTask — via pmsHelper.js's pmsPost, authenticated with the same
+// UAT token every other PMS call in this app uses. No direct DB connection to PMS's database
+// exists anywhere in this app anymore.
 
 module.exports = {
   quantifyPool,
   masterPool,
   projectCodePool,
-  ahanaPilotPool,
   query,
   masterQuery,
   projectCodeQuery,
-  ahanaPilotQuery,
 };
