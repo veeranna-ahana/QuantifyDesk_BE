@@ -1,5 +1,9 @@
 const { query } = require("../config/db");
 const { runHrmsSync } = require("../../services/hrmsSyncService");
+const { fetchAllEmployeesFromHrms } = require('../../services/hrmsService');
+const { pmsGet } = require("../../helpers/pmsHelper");
+const { getUatToken } = require("../../helpers/pmsTokenStore");
+
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/hrms/sync-timesheets  (manual trigger — same as cron)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -170,6 +174,9 @@ async function fetchCategoryTimesheetsGroupedByEmployee(projectcategory_code) {
         last_submitted_on: r.submitted_on || null,
         last_approved_by: r.approved_by || null,
         last_approved_on: r.approved_on || null,
+         last_entry_status: status,                       // ← ADD
+        last_entire_approved_on:                          // ← ADD
+          status === "Approved" ? (r.approved_on || null) : null,
       });
     } else {
       const a = map.get(key);
@@ -205,6 +212,13 @@ async function fetchCategoryTimesheetsGroupedByEmployee(projectcategory_code) {
         a.last_approved_on = r.approved_on;
         a.last_approved_by = r.approved_by || null;
       }
+       // ─── NEW: track the latest entry's status, and derive the
+      //          "last entire approval" date from it ─────────────
+      // Rows arrive ordered by from_date ASC, so r is the latest entry
+      // seen so far for this employee.
+      a.last_entry_status = status;
+      a.last_entire_approved_on =
+        status === "Approved" ? (r.approved_on || null) : null;
     }
   }
 
@@ -220,9 +234,9 @@ async function fetchCategoryTimesheetsGroupedByEmployee(projectcategory_code) {
           : a.approved === a.entries
             ? "Approved"
             : "Mixed";
-
+const { last_entry_status, ...rest } = a;
     return {
-      ...a,
+      ...rest,
       total_hours: round2(a.total_hours),
       approved_hours: round2(a.approved_hours),
       pending_hours: round2(a.pending_hours),
@@ -335,10 +349,474 @@ const getAllCategoriesTimesheetsReport = async (req, res) => {
     });
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/hrms/timesheets-app-dev-designation-report
+//
+// Aggregates hrms_timesheet rows for every active Delivery employee whose
+// designation contains "Application Development" (case-insensitive).
+// ─────────────────────────────────────────────────────────────────────────────
+const getAppDevDesignationTimesheetsReport = async (req, res) => {
+  try {
+    const includeEmpty = String(req.query.include_empty || '').toLowerCase() === 'true';
+
+    // ─── 1. Fetch HRMS employees and filter ─────────────────────────────
+    const allEmployees = await fetchAllEmployeesFromHrms();
+
+    const matchedEmployees = allEmployees.filter((e) => {
+      const dept = String(e.Name_of_Department || '').trim();
+      const status = String(e.Employee_Status || '').trim().toLowerCase();
+      const designation = String(e.Employee_Designation || '').toLowerCase();
+
+      return (
+        dept === 'Delivery' &&
+        status === 'active' &&
+        designation.includes('application development')
+      );
+    });
+
+    if (matchedEmployees.length === 0) {
+      return res.status(200).json({
+        success: true,
+        total_entries: 0,
+        totals: { total_hours: 0, approved_hours: 0, pending_hours: 0, rejected_hours: 0, total_entries: 0, total_employees: 0 },
+        data: [],
+      });
+    }
+
+    const empIds = matchedEmployees.map((e) => e.Employee_ID).filter(Boolean);
+    const placeholders = empIds.map(() => '?').join(',');
+
+    // ─── 2. Pull timesheet rows ─────────────────────────────────────────
+    const rows = await query(
+      `SELECT *
+         FROM hrms_timesheet
+        WHERE employee_id IN (${placeholders})
+        ORDER BY employee_id, projectcategory_code, from_date`,
+      empIds
+    );
+
+    // Map HRMS records for metadata
+    const hrmsById = new Map();
+    for (const e of matchedEmployees) {
+      if (e.Employee_ID) hrmsById.set(String(e.Employee_ID).trim(), e);
+    }
+
+    // ─── 3. Group by (employee_id + projectcategory_code) ───────────────
+    const byProject = new Map();
+    const round2 = (n) => Math.round(n * 100) / 100;
+
+    for (const r of rows) {
+      const empId = r.employee_id;
+      const category = r.projectcategory_code || 'NA';
+      
+      // Composite key: one object per employee per category
+      const key = `${empId}|${category}`;
+
+      if (!byProject.has(key)) {
+        const hrms = hrmsById.get(String(empId).trim()) || {};
+        byProject.set(key, {
+          employee_id: empId,
+          employee_name: r.employee_name || hrms.Employee_Name || null,
+          designation: hrms.Employee_Designation || null,
+          department: hrms.Name_of_Department || null,
+          employee_email: hrms.Employee_Official_Email_ID || null,
+          employee_phone: hrms.Employee_Phone || null,
+          reporting_manager: hrms.Reporting_Manager_Name || null,
+          employment_type: hrms.Employment_Type || null,
+          doj: hrms.DOJ || null,
+
+          project_code: r.project_code || null,
+          project_name: r.project_name || null,
+          projectcategory_code: category,
+          projectcategory_name: r.projectcategory_name || null,
+
+          from_date: r.from_date,
+          to_date: r.to_date,
+
+          total_hours: 0,
+          approved_hours: 0,
+          pending_hours: 0,
+          rejected_hours: 0,
+
+          entries: 0,
+          approved: 0,
+          pending: 0,
+          rejected: 0,
+
+          last_submitted_on: r.submitted_on || null,
+          last_approved_by: r.approved_by || null,
+          last_approved_on: r.approved_on || null,
+        });
+      }
+
+      const a = byProject.get(key);
+      const hours = Number(r.number_of_hours) || 0;
+      const status = (r.approval_status || '').trim();
+
+      a.total_hours += hours;
+      a.entries += 1;
+
+      if (status === 'Approved') { a.approved += 1; a.approved_hours += hours; }
+      else if (status === 'Pending') { a.pending += 1; a.pending_hours += hours; }
+      else if (status === 'Rejected') { a.rejected += 1; a.rejected_hours += hours; }
+
+      if (r.from_date && (!a.from_date || r.from_date < a.from_date)) a.from_date = r.from_date;
+      if (r.to_date && (!a.to_date || r.to_date > a.to_date)) a.to_date = r.to_date;
+
+      if (r.submitted_on && (!a.last_submitted_on || r.submitted_on > a.last_submitted_on)) {
+        a.last_submitted_on = r.submitted_on;
+      }
+      if (r.approved_on && (!a.last_approved_on || r.approved_on > a.last_approved_on)) {
+        a.last_approved_on = r.approved_on;
+        a.last_approved_by = r.approved_by || null;
+      }
+    }
+
+    // ─── 4. Finalize objects ────────────────────────────────────────────
+    const results = [];
+    for (const a of byProject.values()) {
+      const overallStatus =
+        a.pending > 0 ? 'Pending'
+        : a.rejected > 0 ? 'Rejected'
+        : a.approved === a.entries ? 'Approved'
+        : 'Mixed';
+
+      if (!includeEmpty && a.entries === 0) continue;
+
+      results.push({
+        ...a,
+        total_hours: round2(a.total_hours),
+        approved_hours: round2(a.approved_hours),
+        pending_hours: round2(a.pending_hours),
+        rejected_hours: round2(a.rejected_hours),
+        overall_status: overallStatus,
+      });
+    }
+
+    // Sort: Employee name first, then by total hours descending
+    results.sort((a, b) => {
+      const nameCompare = String(a.employee_name).localeCompare(String(b.employee_name));
+      if (nameCompare !== 0) return nameCompare;
+      return b.total_hours - a.total_hours;
+    });
+
+    // ─── 5. Grand totals ────────────────────────────────────────────────
+    const grand = {
+      total_hours: 0,
+      approved_hours: 0,
+      pending_hours: 0,
+      rejected_hours: 0,
+      total_entries: 0,
+      total_employees: new Set(results.map(r => r.employee_id)).size,
+    };
+
+    for (const r of results) {
+      grand.total_hours     += r.total_hours;
+      grand.approved_hours  += r.approved_hours;
+      grand.pending_hours   += r.pending_hours;
+      grand.rejected_hours  += r.rejected_hours;
+      grand.total_entries   += r.entries;
+    }
+    grand.total_hours     = round2(grand.total_hours);
+    grand.approved_hours  = round2(grand.approved_hours);
+    grand.pending_hours   = round2(grand.pending_hours);
+    grand.rejected_hours  = round2(grand.rejected_hours);
+
+    // ─── 6. Response ────────────────────────────────────────────────────
+    return res.status(200).json({
+      success: true,
+      filter: {
+        department: 'Delivery',
+        status: 'Active',
+        designation_contains: 'Application Development',
+      },
+      totals: grand,
+      data: results,
+    });
+  } catch (err) {
+    console.error('❌ getAppDevDesignationTimesheetsReport error:', err.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to load App-Dev designation timesheet report',
+      error: err.message,
+    });
+  }
+};
+
+const getProjectWiseSummary = async (req, res) => {
+  try {
+    // ─── 1. Resolve Token ────────────────────────────────────────────────
+    const uatToken =
+      getUatToken(req.user?.emp_id) || process.env.PMS_SERVICE_TOKEN || null;
+
+    if (!uatToken) {
+      return res.status(401).json({
+        success: false,
+        message: 'No PMS session found. Please log in again.',
+      });
+    }
+
+    // ─── 2. Fetch HRMS Employees to filter for App Dev ───────────────────
+    const allEmployees = await fetchAllEmployeesFromHrms();
+    
+    const appDevEmpIds = allEmployees
+      .filter((e) => {
+        const dept = String(e.Name_of_Department || '').trim();
+        const status = String(e.Employee_Status || '').trim().toLowerCase();
+        const designation = String(e.Employee_Designation || '').toLowerCase();
+
+        return (
+          dept === 'Delivery' &&
+          status === 'active' &&
+          designation.includes('application development')
+        );
+      })
+      .map((e) => e.Employee_ID)
+      .filter(Boolean);
+
+    if (appDevEmpIds.length === 0) {
+      return res.status(200).json({
+        title: 'Project wise summary (App Dev)',
+        totalRecords: 0,
+        projects: [],
+      });
+    }
+
+    // ─── 3. Aggregate Timesheet Data (Filtered by App Dev IDs) ───────────
+    const placeholders = appDevEmpIds.map(() => '?').join(',');
+
+    const rows = await query(
+      `SELECT
+         projectcategory_code,
+         MAX(projectcategory_name) AS projectcategory_name,
+         MAX(project_code)         AS parent_project_code,
+         COUNT(DISTINCT employee_id) AS member_worked,
+         SUM(number_of_hours)        AS total_hours,
+         MIN(from_date)              AS first_date
+       FROM hrms_timesheet
+       WHERE projectcategory_code IS NOT NULL
+         AND TRIM(projectcategory_code) <> ''
+         AND projectcategory_code <> 'NA'
+         AND employee_id IN (${placeholders})  -- ✅ Filter by App Dev team
+       GROUP BY projectcategory_code
+       ORDER BY total_hours DESC`,
+      appDevEmpIds
+    );
+
+    if (rows.length === 0) {
+      return res.status(200).json({
+        title: 'Project wise summary (App Dev)',
+        totalRecords: 0,
+        projects: [],
+      });
+    }
+
+    // ─── 4. Fetch PMS Projects for customer_name ─────────────────────────
+    let pmsProjects = [];
+    try {
+      const rawPms = await pmsGet(uatToken, '/api/pms/getAllProjects');
+      pmsProjects = Array.isArray(rawPms?.projects) ? rawPms.projects : 
+                    Array.isArray(rawPms?.data?.projects) ? rawPms.data.projects : [];
+    } catch (err) {
+      console.warn('⚠️ PMS getAllProjects failed, customer_name will be null:', err.message);
+    }
+
+    // ─── 5. Merge and Format ─────────────────────────────────────────────
+    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    
+    const projects = rows.map((r) => {
+      const code = r.projectcategory_code;
+      const hrmsName = String(r.projectcategory_name || '').toLowerCase();
+
+      // Customer name matching logic (from previous step)
+      const pmsProj = pmsProjects.find((p) => {
+        if (!p.project_title) return false;
+        const title = p.project_title.toLowerCase();
+        
+        if (title === hrmsName) return true;
+        if (title.includes(code.toLowerCase()) || hrmsName.includes(code.toLowerCase())) return true;
+
+        const cleanTitle = title.replace(/[^a-z0-9]/g, ' ');
+        const cleanHrms = hrmsName.replace(/[^a-z0-9]/g, ' ');
+        if (cleanTitle.includes('work quantify') && cleanHrms.includes('work quantify')) return true;
+
+        return false;
+      });
+
+      let firstMonthSeen = 'N/A';
+      if (r.first_date) {
+        const d = new Date(r.first_date);
+        firstMonthSeen = monthNames[d.getMonth()];
+      }
+
+      return {
+        projectCode: code,
+        projectName: r.projectcategory_name,
+        customerName: pmsProj?.customer_name || null,
+        memberWorked: Number(r.member_worked) || 0,
+        totalHours: Math.round((Number(r.total_hours) || 0) * 100) / 100,
+        firstMonthSeen,
+        parentCategory: r.parent_project_code,
+      };
+    });
+
+    // ─── 6. Response ─────────────────────────────────────────────────────
+    return res.status(200).json({
+      title: 'Project wise summary (App Dev)',
+      totalRecords: projects.length,
+      projects,
+    });
+  } catch (err) {
+    console.error('❌ getProjectWiseSummary error:', err.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to load project-wise summary',
+      error: err.message,
+    });
+  }
+};
+
+const getResourceBreakdown = async (req, res) => {
+  try {
+    // ─── 1. Resolve Token ────────────────────────────────────────────────
+    const uatToken =
+      getUatToken(req.user?.emp_id) || process.env.PMS_SERVICE_TOKEN || null;
+
+    if (!uatToken) {
+      return res.status(401).json({
+        success: false,
+        message: 'No PMS session found. Please log in again.',
+      });
+    }
+
+    // ─── 2. Fetch App Dev Employees from HRMS ────────────────────────────
+    const allEmployees = await fetchAllEmployeesFromHrms();
+    
+    const appDevEmps = allEmployees.filter((e) => {
+      const dept = String(e.Name_of_Department || '').trim();
+      const status = String(e.Employee_Status || '').trim().toLowerCase();
+      const designation = String(e.Employee_Designation || '').toLowerCase();
+
+      return (
+        dept === 'Delivery' &&
+        status === 'active' &&
+        designation.includes('application development')
+      );
+    });
+
+    if (appDevEmps.length === 0) {
+      return res.status(200).json({
+        title: 'Resource breakdown',
+        totalRecords: 0,
+        resources: [],
+      });
+    }
+
+    const appDevEmpIds = appDevEmps.map((e) => e.Employee_ID).filter(Boolean);
+    const placeholders = appDevEmpIds.map(() => '?').join(',');
+
+    // Map for quick name lookup
+    const hrmsById = new Map();
+    for (const e of appDevEmps) {
+      hrmsById.set(String(e.Employee_ID).trim(), e);
+    }
+
+    // ─── 3. Aggregate DB by (Employee + Project Category) ────────────────
+    const rows = await query(
+      `SELECT
+         projectcategory_code,
+         MAX(projectcategory_name) AS projectcategory_name,
+         MAX(project_code)         AS parent_project_code,
+         employee_id,
+         MAX(employee_name)        AS employee_name,
+         SUM(number_of_hours)      AS logged_hours
+       FROM hrms_timesheet
+       WHERE projectcategory_code IS NOT NULL
+         AND TRIM(projectcategory_code) <> ''
+         AND projectcategory_code <> 'NA'
+         AND employee_id IN (${placeholders})
+       GROUP BY projectcategory_code, employee_id
+       ORDER BY projectcategory_code, logged_hours DESC`,
+      appDevEmpIds
+    );
+
+    if (rows.length === 0) {
+      return res.status(200).json({
+        title: 'Resource breakdown',
+        totalRecords: 0,
+        resources: [],
+      });
+    }
+
+    // ─── 4. Fetch PMS Projects for customer_name ─────────────────────────
+    let pmsProjects = [];
+    try {
+      const rawPms = await pmsGet(uatToken, '/api/pms/getAllProjects');
+      pmsProjects = Array.isArray(rawPms?.projects) ? rawPms.projects : 
+                    Array.isArray(rawPms?.data?.projects) ? rawPms.data.projects : [];
+    } catch (err) {
+      console.warn('⚠️ PMS getAllProjects failed, customer_name will be null:', err.message);
+    }
+
+    // ─── 5. Merge and Format ─────────────────────────────────────────────
+    const resources = rows.map((r) => {
+      const code = r.projectcategory_code;
+      const hrmsName = String(r.projectcategory_name || '').toLowerCase();
+
+      // Match project to PMS to get customer name
+      const pmsProj = pmsProjects.find((p) => {
+        if (!p.project_title) return false;
+        const title = p.project_title.toLowerCase();
+        
+        if (title === hrmsName) return true;
+        if (title.includes(code.toLowerCase()) || hrmsName.includes(code.toLowerCase())) return true;
+
+        const cleanTitle = title.replace(/[^a-z0-9]/g, ' ');
+        const cleanHrms = hrmsName.replace(/[^a-z0-9]/g, ' ');
+        if (cleanTitle.includes('work quantify') && cleanHrms.includes('work quantify')) return true;
+
+        return false;
+      });
+
+      // Ensure we have the latest HRMS data for the employee (in case DB is stale)
+      const hrmsEmp = hrmsById.get(String(r.employee_id).trim()) || {};
+
+      return {
+        projectCode: code,
+        projectName: r.projectcategory_name,
+        customerName: pmsProj?.customer_name || null,
+        Emp_id: r.employee_id,                                   // matching your requested shape
+        Emp_Name: hrmsEmp.Employee_Name || r.employee_name,      // fallback to DB name if HRMS missing
+        loggedHours: Math.round((Number(r.logged_hours) || 0) * 100) / 100,
+        parentCategory: r.parent_project_code,
+      };
+    });
+
+    // ─── 6. Response ─────────────────────────────────────────────────────
+    return res.status(200).json({
+      title: 'Resource breakdown',
+      totalRecords: resources.length,
+      resources,
+    });
+  } catch (err) {
+    console.error('❌ getAppDevResourceBreakdown error:', err.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to load resource breakdown',
+      error: err.message,
+    });
+  }
+};
+
+
 module.exports = {
   syncHrmsTimesheets,
   getHrmsTimesheets,
   getCategoryTimesheetsGroupedByEmployee,
   fetchCategoryTimesheetsGroupedByEmployee,
-  getAllCategoriesTimesheetsReport
+  getAllCategoriesTimesheetsReport,
+   getAppDevDesignationTimesheetsReport,
+    getProjectWiseSummary,
+    getResourceBreakdown 
 };
