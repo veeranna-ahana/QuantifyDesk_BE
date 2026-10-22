@@ -37,8 +37,16 @@ async function runWithConcurrency(items, limit, worker) {
 //
 // Per skill: list of employees who have that skill (with projects).
 //
+// Scoped to the same employee set as Member Details (GET /api/employees/delivery-details) —
+// Name_of_Practice_Head === "Sudheendra Gururaj M P" and Employee_Status === "Active" — so the
+// two screens always show the same people. This REPLACES the previous `?department=` query-param
+// filter (which defaulted to "Delivery" and could be widened with `?department=all`); that was a
+// different field (Name_of_Department) producing a different, inconsistent set of employees from
+// Member Details. It's intentionally hardcoded, same as employeesController.js's filter, not
+// query-param-driven — if this needs to vary later (e.g. by logged-in manager), both controllers
+// should move to that together, not just this one.
+//
 // Query params (all optional):
-//   ?department=Delivery        default = 'Delivery'; pass 'all' to disable
 //   ?skill=Java                 filter to a single skill/sub-skill
 //   ?include_sub_skills=true    also group by sub-skill
 // ─────────────────────────────────────────────────────────────────────────────
@@ -56,14 +64,6 @@ const getSkillAnalytics = async (req, res) => {
     }
 
     // ─── 2. Parse filters ─────────────────────────────────────────────
-    const rawDept = req.query.department;
-    const filterDept =
-      rawDept === undefined
-        ? "Delivery" // default
-        : rawDept === "all" || rawDept === ""
-          ? "" // disable filter
-          : String(rawDept).trim();
-
     const filterSkill = (req.query.skill || "").trim();
     const includeSubSkills =
       String(req.query.include_sub_skills || "").toLowerCase() === "true";
@@ -87,11 +87,11 @@ const getSkillAnalytics = async (req, res) => {
       const hrms = hrmsById.get(String(empId).trim());
       if (!hrms) continue;
 
-      // Department filter
-      if (
-        filterDept &&
-        String(hrms.Name_of_Department || "").trim() !== filterDept
-      ) {
+      // Same scope as Member Details (employeesController.js's getDeliveryEmployeeDetails) —
+      // see this function's header comment for why.
+      const practiceHead = String(hrms.Name_of_Practice_Head || "").trim();
+      const status = String(hrms.Employee_Status || "").trim();
+      if (practiceHead !== "Sudheendra Gururaj M P" || status !== "Active") {
         continue;
       }
 
@@ -247,7 +247,10 @@ const getSkillAnalytics = async (req, res) => {
       success: true,
       total_skills: skills.length,
       filters: {
-        department: filterDept || "ALL",
+        // Hardcoded now, same as Member Details — no longer a request-provided value, so this
+        // just states what scope was applied rather than echoing back a query param.
+        practice_head: "Sudheendra Gururaj M P",
+        employee_status: "Active",
         skill: filterSkill || null,
         include_sub_skills: includeSubSkills,
       },

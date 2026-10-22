@@ -7,6 +7,12 @@ const {
   normalizePMSError,
 } = require("../../helpers/pmsHelper");
 const { getEmployeeNameMapFromHRMS } = require("./hrms.controller");
+const {
+  normalizeTaskStatus,
+  classifyProject,
+  healthBucketLabel,
+  distributionBucketLabel,
+} = require("../../helpers/projectHealth");
 
 const HOURS_PER_DAY = 8; // adjust if the org uses a different value
 
@@ -25,147 +31,13 @@ const HOURS_PER_DAY = 8; // adjust if the org uses a different value
 // helper every other PMS-calling controller now uses (importProject,
 // dailyReport) — no more per-file PMS_CONFIG/getPMSHeaders/axios copies.
 // The auth pattern is unchanged: getUatToken(emp_id) from pmsTokenStore.js.
+//
+// normalizeTaskStatus / classifyProject / healthBucketLabel / distributionBucketLabel used to be
+// defined locally in this file. They're now in helpers/projectHealth.js, shared with
+// importProject.controller.js's Project Overview tab, so both screens compute the exact same
+// status for the exact same project — see that module's header comment for why (a project could
+// previously show "On Hold" on Project Overview but "In Progress" on this Dashboard).
 // ============================================================================
-
-// Maps PMS's own task status values straight to our three buckets. PMS only ever sends exactly
-// "COMPLETED", "STARTED", or "YET_TO_START" for a task's `status` (confirmed against a real
-// getProjectDetails response) — a previous loose `.includes("progress")` check here never
-// matched "STARTED" and silently miscounted every in-progress task as "Not Started". Duplicated
-// here (not imported from importProject.controller.js, which has the same fix) so this file has
-// no dependency on the wizard controller and can evolve independently.
-function normalizeTaskStatus(rawStatus) {
-  const status = String(rawStatus || "").toUpperCase();
-
-  if (status === "COMPLETED") {
-    return "completed";
-  }
-  if (status === "STARTED") {
-    return "in_progress";
-  }
-  return "not_started";
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Classifies ONE imported project into the dashboard's buckets from its PMS tasks, dates and
-// status. Rules, first match wins:
-//
-//   Completed   every task is COMPLETED (even if that happened after the planned end date), or
-//               PMS itself says the project is complete.
-//   Delayed     not completed, and the planned end date has passed.
-//   At Risk     not completed, not yet delayed, and the planned end date is within the next
-//               AT_RISK_DAYS days (today counts).
-//   On Track    otherwise, when the share of tasks completed is at least the share of the
-//               planned timeline that has passed (50% done at the halfway point = On Track).
-//   In Progress otherwise: work has started but is behind that pace.
-//
-// A project with no tasks, or no usable dates, can't be judged on pace, so it falls back to the
-// PMS status text: "progress" → In Progress, anything else → On Track.
-// On Hold / Inactive projects are never At Risk (they only feed the Status Distribution donut).
-// ─────────────────────────────────────────────────────────────────────────
-const AT_RISK_DAYS = 3;
-
-// Whole-day number for a PMS date ("2026-10-30" or "2026-10-30T00:00:00.000Z" → its calendar
-// day), so comparisons ignore time of day and time zones. null when the value isn't a date.
-function dayNumber(value) {
-  if (!value) return null;
-  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (match) return Date.UTC(+match[1], +match[2] - 1, +match[3]) / 86400000;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return (
-    Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000
-  );
-}
-
-function classifyProject({
-  rawStatus,
-  plannedStartDate,
-  plannedEndDate,
-  tasks,
-}) {
-  const status = String(rawStatus || "").toLowerCase();
-  const taskList = Array.isArray(tasks) ? tasks : [];
-  const totalTasks = taskList.length;
-  const completedTasks = taskList.filter(
-    (t) => normalizeTaskStatus(t.status) === "completed",
-  ).length;
-
-  const completed =
-    (totalTasks > 0 && completedTasks === totalTasks) ||
-    status.includes("complete") ||
-    status.includes("done");
-
-  const now = new Date();
-  const today =
-    Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) / 86400000;
-
-  // Planned start: the project's own date, else the earliest planned task start
-  let startDay = dayNumber(plannedStartDate);
-  if (startDay === null) {
-    const taskStarts = taskList
-      .map((t) => dayNumber(t.planned_start_date))
-      .filter((d) => d !== null);
-    startDay = taskStarts.length ? Math.min(...taskStarts) : null;
-  }
-  const endDay = dayNumber(plannedEndDate);
-
-  const delayed = !completed && endDay !== null && endDay < today;
-  const onHold =
-    !completed &&
-    !delayed &&
-    (status.includes("hold") || status.includes("inactive"));
-
-  const atRisk =
-    !completed &&
-    !delayed &&
-    !onHold &&
-    endDay !== null &&
-    endDay - today <= AT_RISK_DAYS;
-
-  // Pace: share of tasks completed vs share of the planned timeline already used
-  let onTrack;
-  if (
-    totalTasks > 0 &&
-    startDay !== null &&
-    endDay !== null &&
-    endDay > startDay
-  ) {
-    const elapsed = Math.min(
-      Math.max((today - startDay) / (endDay - startDay), 0),
-      1,
-    );
-    onTrack = completedTasks / totalTasks >= elapsed;
-  } else {
-    onTrack = !status.includes("progress");
-  }
-
-  return {
-    completed,
-    delayed,
-    onHold,
-    atRisk,
-    onTrack: !completed && !delayed && !atRisk && onTrack,
-    inProgress: !completed && !delayed && !atRisk && !onTrack,
-  };
-}
-
-// The single label the Health Overview chart, the dashboard cards and the Delivery Performance
-// STATUS column all use.
-function healthBucketLabel(classification) {
-  if (classification.completed) return "Completed";
-  if (classification.delayed) return "Delayed";
-  if (classification.atRisk) return "At Risk";
-  if (classification.onTrack) return "On Track";
-  return "In Progress";
-}
-
-// The Status Distribution donut's label.
-function distributionBucketLabel(classification) {
-  if (classification.completed) return "Completed";
-  if (classification.delayed) return "Delayed";
-  if (classification.onHold) return "On Hold";
-  return "Active";
-}
 
 // ─────────────────────────────────────────────────────────────────────────
 // GET /api/import-project/dashboard/overview
@@ -210,6 +82,7 @@ const getDashboardOverview = async (req, res, next) => {
           "In Progress",
           "At Risk",
           "Delayed",
+          "On Hold",
           "Completed",
         ].map((status) => ({
           status,
@@ -297,6 +170,10 @@ const getDashboardOverview = async (req, res, next) => {
       "In Progress": 0,
       "At Risk": 0,
       Delayed: 0,
+      // "On Hold" added — healthBucketLabel can now return it (see helpers/projectHealth.js's
+      // fix), and without a matching key here `healthCounts[healthLabel] += 1` would silently
+      // compute NaN for every On Hold project instead of throwing or counting it.
+      "On Hold": 0,
       Completed: 0,
     };
     const distributionCounts = {
