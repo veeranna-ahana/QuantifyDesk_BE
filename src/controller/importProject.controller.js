@@ -18,6 +18,10 @@ const {
   getActiveEmployeesFromHRMS,
   getEmployeeNameMapFromHRMS,
 } = require("./hrms.controller");
+const {
+  classifyProject,
+  healthBucketLabel,
+} = require("../../helpers/projectHealth");
 
 // ============================================================================
 // Import Project — Step 1 (Project Info)
@@ -1024,7 +1028,33 @@ const getProjectView = async (req, res, next) => {
       planned_end_date: projectDetails?.planned_end_date || null,
       actual_start_date: projectDetails?.actual_start_date || null,
       actual_end_date: projectDetails?.actual_end_date || null,
-      project_status: projectDetails?.status || null,
+      // Our application's own computed status (On Track / In Progress / At Risk / Delayed /
+      // On Hold / Completed) — the SAME classification the Dashboard's Project Delivery
+      // Performance table uses (helpers/projectHealth.js), not PMS's raw status text.
+      //
+      // Before this fix, Project Overview showed PMS's raw `projectDetails.status` (e.g.
+      // "ON_HOLD") while the Dashboard showed our own computed bucket — and that bucket's own
+      // label function had a bug where On Hold never got checked, so it fell through to "In
+      // Progress"/"On Track" there too. Per team lead's decision: both navigation paths (Projects
+      // main page → View, and Dashboard → Project Delivery Performance → View) must show the
+      // same status, computed the same way, here. pms_status below keeps PMS's raw text
+      // available for anything that still needs it, but is not what's shown as "Status".
+      //
+      // Only computed when the PMS call above actually succeeded (projectDetails is non-null) —
+      // classifying off a status we never got would fabricate a bucket (e.g. an empty rawStatus
+      // with no tasks/dates falls back to "On Track" inside classifyProject), which is exactly
+      // the kind of guessed value this app never shows as if it were real.
+      project_status: projectDetails
+        ? healthBucketLabel(
+            classifyProject({
+              rawStatus: projectDetails.status || null,
+              plannedStartDate: projectDetails.planned_start_date || null,
+              plannedEndDate: projectDetails.planned_end_date || null,
+              tasks: tasksDetails,
+            }),
+          )
+        : null,
+      pms_status: projectDetails?.status || null,
       description: projectDetails?.description || null,
       project_coordinator: projectDetails?.project_coordinator || null,
       // ── Locally owned ─────────────────────────────────────────────────

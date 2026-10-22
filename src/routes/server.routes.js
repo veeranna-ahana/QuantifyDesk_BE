@@ -5,21 +5,24 @@ const { authMiddleware } = require("../middleware/auth.middleware");
 const {
   getServerOptions,
   getServerProjects,
+  getAssignedProjectOptions,
   getServers,
   getServerById,
   createServer,
   updateServer,
 } = require("../controller/server.controller");
 
-// GET  /api/servers/options    Environment / Initial Status / OS dropdown lists (backend constants)
-// GET  /api/servers/projects   Allocated Projects options (PMS unique titles + custom ones)
-// GET  /api/servers            list (page, pageSize, search) + activeCount
-// GET  /api/servers/:id        one server (Edit Server pre-fill)
-// POST /api/servers            create
-// PUT  /api/servers/:id        update
+// GET  /api/servers/options             Environment / Initial Status / OS dropdown lists (backend constants)
+// GET  /api/servers/projects            Allocated Projects options for Add/Edit Server (PMS unique titles + custom ones)
+// GET  /api/servers/assigned-projects   Distinct projects actually assigned to a server, for the list's Filter popup
+// GET  /api/servers                     list (page, pageSize, search) + activeCount
+// GET  /api/servers/:id                 one server (Edit Server pre-fill)
+// POST /api/servers                     create
+// PUT  /api/servers/:id                 update
 // The fixed paths must stay above "/:id".
 router.get("/options", authMiddleware, getServerOptions);
 router.get("/projects", authMiddleware, getServerProjects);
+router.get("/assigned-projects", authMiddleware, getAssignedProjectOptions);
 router.get("/", authMiddleware, getServers);
 router.get("/:id", authMiddleware, getServerById);
 router.post("/", authMiddleware, createServer);
@@ -176,6 +179,33 @@ module.exports = router;
  *             example:
  *               projects: ["Ahana WPT", "Department Rating"]
  *               pmsError: null
+ *       401:
+ *         $ref: '#/components/responses/UnauthorizedError'
+ *       500:
+ *         $ref: '#/components/responses/InternalServerError'
+ */
+
+/**
+ * @swagger
+ * /servers/assigned-projects:
+ *   get:
+ *     summary: Projects actually assigned to a server (merged into the list's Filter popup)
+ *     description: |
+ *       Distinct project names pulled from server_info.assigned_projects across active servers —
+ *       NOT the full PMS catalog (see /servers/projects for that). This exists for custom names
+ *       typed through "Other (Add Project)" on Add/Edit Server, which are never in PMS and so
+ *       never appear in /servers/projects. The Filter popup's "Assign Project" options are the
+ *       union of this and /servers/projects. No PMS call involved here.
+ *     tags: [Servers]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Projects retrieved successfully
+ *         content:
+ *           application/json:
+ *             example:
+ *               projects: ["Ahana WPT", "Department Rating"]
  *       401:
  *         $ref: '#/components/responses/UnauthorizedError'
  *       500:
