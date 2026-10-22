@@ -1,7 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const { syncHrmsTimesheets, getHrmsTimesheets,  getCategoryTimesheetsGroupedByEmployee, getAllCategoriesTimesheetsReport
+const { syncHrmsTimesheets, getHrmsTimesheets,  getCategoryTimesheetsGroupedByEmployee, getAllCategoriesTimesheetsReport,  getAppDevDesignationTimesheetsReport,
+   getProjectWiseSummary, getResourceBreakdown 
  } = require('../controller/projectTimesheet.controller');
+ const { authMiddleware } = require('../middleware/auth.middleware');
 
 // POST /api/hrms/sync-timesheets
 // Body (optional): { "projectCodes": ["D:SS2:NC:GENACT", "I:A&A:SP:PROJCT"] }
@@ -15,6 +17,23 @@ router.get('/timesheets-by-category', getCategoryTimesheetsGroupedByEmployee);
 router.get(
   '/timesheets-all-categories-report',
   getAllCategoriesTimesheetsReport
+);
+
+router.get(
+  '/timesheets-app-dev-designation-report',
+  getAppDevDesignationTimesheetsReport
+);
+
+router.get(
+  '/project-wise-summary',
+  authMiddleware,
+  getProjectWiseSummary
+);
+
+router.get(
+  '/resource-breakdown',
+  authMiddleware,
+  getResourceBreakdown
 );
 
 module.exports = router;
