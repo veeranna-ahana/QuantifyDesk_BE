@@ -42,9 +42,9 @@ const getDeliveryEmployeeDetails = async (req, res) => {
     // ─── 1. HRMS employees ────────────────────────────────────────────────
     const allEmployees = await fetchAllEmployeesFromHrms();
     const deliveryEmployees = allEmployees.filter((e) => {
-      const dept = String(e.Name_of_Department || "").trim();
+      const dept = String(e.Name_of_Practice_Head || "").trim();
       const status = String(e.Employee_Status || "").trim();
-      return dept === "Delivery" && status === "Active";
+      return dept === "Sudheendra Gururaj M P" && status === "Active";
     });
 
     if (deliveryEmployees.length === 0) {
@@ -174,7 +174,7 @@ const getDeliveryEmployeeDetails = async (req, res) => {
         emp_id: emp.Employee_ID,
         emp_name: emp.Employee_Name,
         designation: emp.Employee_Designation,
-        department: emp.Name_of_Department,
+        department: emp.Name_of_Practice_Head,
         email: emp.Employee_Official_Email_ID,
         doj: emp.DOJ,
         experience_years: calcExperienceYears(emp.DOJ),
