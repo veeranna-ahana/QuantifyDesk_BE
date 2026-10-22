@@ -19,10 +19,13 @@ const {
 // Add / Edit Server form needs. One table: server_info (sql/2026_10_server_information.sql).
 // Rows are soft-deleted via is_active = 0.
 //
-// Project options are the unique titles from PMS (getAllProjects) plus any name already used on a
-// server, which is how a name typed in through "Other (Add Project)" becomes a normal option next
-// time. A server keeps its project names in server_info.assigned_projects as a JSON array text,
-// e.g. ["FMS Project","WPT Project"] — no separate project table.
+// Add/Edit Server's project picker offers the unique titles from PMS (getAllProjects) plus any
+// name already used on a server, which is how a name typed in through "Other (Add Project)"
+// becomes a normal option next time. The Server Information list's Filter popup wants that same
+// PMS catalog PLUS those custom names (getAssignedProjectOptions below) — the frontend merges
+// both so a custom-only project (never in PMS, only ever typed via "Other") still shows up as a
+// filter option. A server keeps its project names in server_info.assigned_projects as a JSON
+// array text, e.g. ["FMS Project","WPT Project"] — no separate project table.
 // ============================================================================
 
 const DEFAULT_PAGE_SIZE = 10;
@@ -37,6 +40,16 @@ const LIMITS = {
   project: 100,
   description: 5000,
 };
+
+// RAM Capacity / CPU Architecture / Storage are optional, but previously had no format check at
+// all — an IP address or any random text was accepted and saved silently. These mirror the
+// frontend's own patterns (ServerFormPage.jsx's constants.js), so a request made directly against
+// this API (bypassing the form) can't slip something invalid past validation either. Only checked
+// when the field isn't blank.
+const RAM_PATTERN = /^\d+(\.\d+)?\s*(MB|GB|TB)$/i;
+const STORAGE_PATTERN =
+  /^\d+(\.\d+)?\s*(MB|GB|TB)(\s+[A-Za-z0-9/().,+-]+(\s+[A-Za-z0-9/().,+-]+)*)?$/i;
+const CPU_PATTERN = /^\d+\s*(core|cores|vcpu|vcpus)\b.*$/i;
 
 const escapeLike = (s) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 const clean = (v) =>
@@ -86,6 +99,8 @@ const parseProjects = (text) => {
 // GET /api/servers/projects — "Allocated Projects" options: the unique project titles from PMS,
 // nothing else. Custom names typed through "Other" belong to that server only and are never
 // added to this list. If PMS can't be reached the list is empty and `pmsError` says why.
+// Used by the Add/Edit Server form's project picker, which legitimately needs the full PMS
+// catalog so any real project can be assigned (or a custom name typed via "Other").
 const getServerProjects = async (req, res, next) => {
   try {
     let projects = [];
@@ -100,6 +115,33 @@ const getServerProjects = async (req, res, next) => {
       console.error("Server projects: PMS fetch failed:", err.message);
     }
     return res.status(200).json({ projects, pmsError });
+  } catch (err) {
+    return next(err);
+  }
+};
+
+// GET /api/servers/assigned-projects — distinct project names actually assigned to at least one
+// active server, straight from server_info.assigned_projects. This exists because the PMS catalog
+// (/projects above) only lists real PMS projects — it never includes a custom name someone typed
+// through "Other (Add Project)" while adding a server, since that name was never a PMS project.
+// The Server Information list's "Assign Project" FILTER wants both: the frontend merges this with
+// /projects so every assigned project shows up as a filter option, custom or not. No PMS call
+// needed here; everything it returns already lives in this table.
+const getAssignedProjectOptions = async (req, res, next) => {
+  try {
+    const rows = await query(
+      `SELECT assigned_projects AS assignedProjects
+         FROM server_info
+        WHERE is_active = 1`,
+    );
+    const names = new Set();
+    for (const row of rows) {
+      for (const name of parseProjects(row.assignedProjects)) {
+        names.add(name);
+      }
+    }
+    const projects = [...names].sort((a, b) => a.localeCompare(b));
+    return res.status(200).json({ projects });
   } catch (err) {
     return next(err);
   }
@@ -138,10 +180,25 @@ const parseBody = (body = {}) => {
   if (net.isIP(ipAddress) === 0) return { error: "IP address is not valid" };
   if (ram.length > LIMITS.ram)
     return { error: `RAM must be at most ${LIMITS.ram} characters` };
+  if (ram && !RAM_PATTERN.test(ram))
+    return {
+      error:
+        "RAM Capacity must be a number with a unit (MB, GB or TB), e.g. 32 GB",
+    };
   if (cpu.length > LIMITS.cpu)
     return { error: `CPU must be at most ${LIMITS.cpu} characters` };
+  if (cpu && !CPU_PATTERN.test(cpu))
+    return {
+      error:
+        "CPU Architecture must start with a core or vCPU count, e.g. 8 Core Xeon / EPYC",
+    };
   if (storage.length > LIMITS.storage)
     return { error: `Storage must be at most ${LIMITS.storage} characters` };
+  if (storage && !STORAGE_PATTERN.test(storage))
+    return {
+      error:
+        "Storage must start with a number and unit (MB, GB or TB), e.g. 500 GB NVMe SSD",
+    };
   if (gpu.length > LIMITS.gpu)
     return { error: `GPU must be at most ${LIMITS.gpu} characters` };
   if (!os) return { error: "Operating system is required" };
@@ -350,6 +407,7 @@ const updateServer = (req, res, next) =>
 module.exports = {
   getServerOptions,
   getServerProjects,
+  getAssignedProjectOptions,
   getServers,
   getServerById,
   createServer,
