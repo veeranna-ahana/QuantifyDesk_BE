@@ -10,30 +10,31 @@ const authMiddleware = (req, res, next) => {
   // console.log("Method:", req.method);
   // console.log("Headers:", req.headers);
 
-  const authHeader = req.headers["authorization"] || req.headers.authorization;
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.startsWith("Bearer ")
+    ? authHeader.slice("Bearer ".length)
+    : null;
 
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    console.warn(
-      "⚠️ Auth middleware: Authorization header missing or malformed",
-    );
-    return res
-      .status(401)
-      .json({ message: "Authorization token missing or malformed." });
+  if (!token) {
+    console.warn("Authentication rejected: bearer token missing", {
+      method: req.method,
+      path: req.path,
+    });
+    return res.status(401).json({ message: "Authentication required." });
   }
-
-  const token = authHeader.split(" ")[1];
-  // console.log("🔐 Auth middleware: Verifying token:", token.substring(0, 20) + "...");
 
   try {
     const secret =
       process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || "dev_secret";
     const decoded = jwt.verify(token, secret);
-    // console.log("Auth middleware: Token verified successfully for user:", decoded.emp_id);
     req.user = decoded;
-    // console.log("Auth middleware: Token verified for user:", decoded.emp_id);
     return next();
   } catch (err) {
-    console.error(" Auth middleware: Token verification failed:", err.message);
+    console.warn("Authentication rejected: bearer token verification failed", {
+      method: req.method,
+      path: req.path,
+      reason: err.name,
+    });
     return res.status(401).json({ message: "Invalid or expired token." });
   }
 };

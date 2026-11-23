@@ -29,9 +29,7 @@
 const store = new Map(); // emp_id -> { token, expiresAt }
 
 /**
- * Cache the UAT token for a user, with the expiry decoded from the token
- * itself where possible (see auth.controller.js), falling back to a
- * conservative default otherwise.
+ * Cache the portal token for a user until its signed-token expiry.
  */
 function setUatToken(empId, token, expiresAt) {
   if (!empId || !token) return;

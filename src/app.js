@@ -25,6 +25,14 @@ const memberDetailsRoutes = require("./routes/employees.routes");
 const skillAnalyticsRoutes = require("./routes/skills.routes");
 
 const app = express();
+const allowedOrigins = (
+  process.env.CORS_ALLOWED_ORIGINS ||
+  process.env.CLIENT_URL ||
+  "http://localhost:5173"
+)
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 // Dummy Test API
 app.get("/", (req, res) => {
   res.status(200).json({
@@ -46,7 +54,17 @@ app.get("/api/health", (req, res) => {
 const { getCustomers } = require("./controller/project.controller");
 const { authMiddleware } = require("./middleware/auth.middleware");
 
-app.use(cors());
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(null, false);
+    },
+  }),
+);
 app.use(express.json());
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 app.use("/api/auth", authRoutes);

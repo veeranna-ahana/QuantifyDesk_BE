@@ -7,12 +7,30 @@ const { infoLog, errorLog } = require("../../middleware/logger");
 const axios = require("axios");
 const {
   generateAccessToken,
-  generateRefreshToken,
-  verifyRefreshToken,
 } = require("../../helpers/helperFunctions/authHelper");
-const { setUatToken } = require("../../helpers/pmsTokenStore");
+const { setUatToken, clearUatToken } = require("../../helpers/pmsTokenStore");
 
 const SALT_ROUNDS = 10;
+
+const readClaim = (payload, path) =>
+  path?.split(".").reduce((value, key) => value?.[key], payload);
+
+const getPortalEmployeeId = (payload) => {
+  const claimPaths = [
+    process.env.MYAHANA_EMPLOYEE_ID_CLAIM,
+    "emp_id",
+    "employee_id",
+    "employeeId",
+  ].filter(Boolean);
+
+  for (const path of claimPaths) {
+    const value = readClaim(payload, path);
+    if (typeof value === "string" || typeof value === "number") {
+      return String(value);
+    }
+  }
+  return null;
+};
 
 // Express route handler - receives (req, res)
 const login = async (req, res) => {
@@ -123,6 +141,59 @@ const login = async (req, res) => {
       }
     }
 
+    const portalClaims = authToken ? jwt.decode(authToken) : null;
+    const portalExpiry =
+      portalClaims && typeof portalClaims.exp === "number"
+        ? portalClaims.exp
+        : null;
+
+    if (authToken && (!portalExpiry || portalExpiry <= Date.now() / 1000)) {
+      return res.status(401).json({
+        status: "error",
+        success: false,
+        code: "PORTAL_TOKEN_INVALID",
+        message: "Your MyAhana session is invalid or has expired.",
+      });
+    }
+
+    if (authToken && portalClaims) {
+      const expectedIssuer = process.env.MYAHANA_TOKEN_ISSUER;
+      const expectedAudiences = (process.env.MYAHANA_TOKEN_AUDIENCE || "")
+        .split(",")
+        .map((audience) => audience.trim())
+        .filter(Boolean);
+      const actualAudiences = Array.isArray(portalClaims.aud)
+        ? portalClaims.aud
+        : [portalClaims.aud];
+
+      if (
+        (expectedIssuer && portalClaims.iss !== expectedIssuer) ||
+        (expectedAudiences.length &&
+          !expectedAudiences.some((audience) =>
+            actualAudiences.includes(audience),
+          ))
+      ) {
+        return res.status(401).json({
+          status: "error",
+          success: false,
+          code: "PORTAL_TOKEN_INVALID",
+          message: "The portal token is not valid for this application.",
+        });
+      }
+    }
+
+    const portalEmployeeId = getPortalEmployeeId(portalClaims);
+    if (portalEmployeeId && portalEmployeeId !== String(user.emp_id)) {
+      return res.status(401).json({
+        status: "error",
+        success: false,
+        code: "PORTAL_IDENTITY_MISMATCH",
+        message: "The portal token does not match the requested employee.",
+      });
+    }
+    // TODO: Confirm the production employee-ID claim if it is not emp_id,
+    // employee_id, or employeeId; set MYAHANA_EMPLOYEE_ID_CLAIM accordingly.
+
     // Fetch RBC/RBAC details (with or without authToken)
     // tokenVerified = the portal itself (RBAC API) accepted this token. A password-less login
     // is only allowed when this is true — the token must never be trusted on its own.
@@ -140,14 +211,9 @@ const login = async (req, res) => {
           ? { Authorization: `Bearer ${authToken}` }
           : {};
 
-        // console.log("🔑 RBAC Request Headers:", {
-        //   hasToken: !!authToken,
-        //   tokenPrefix: authToken ? authToken.substring(0, 20) + "..." : "none",
-        // });
-
         const instance = axios.create({
           baseURL,
-          httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+          httpsAgent: new https.Agent({ rejectUnauthorized: true }),
           timeout: 8000,
           headers,
         });
@@ -338,8 +404,18 @@ const login = async (req, res) => {
       role_id: loginResult.result[0]?.role_id || 0,
     };
 
-    const accessToken = generateAccessToken(tokenPayload);
-    const refreshToken = generateRefreshToken(tokenPayload);
+    const accessTtlSeconds = authToken
+      ? Math.min(8 * 60 * 60, portalExpiry - Math.floor(Date.now() / 1000))
+      : undefined;
+    if (authToken && accessTtlSeconds <= 0) {
+      return res.status(401).json({
+        status: "error",
+        success: false,
+        code: "PORTAL_TOKEN_INVALID",
+        message: "Your MyAhana session has expired.",
+      });
+    }
+    const accessToken = generateAccessToken(tokenPayload, accessTtlSeconds);
 
     // ── Cache the UAT token server-side for PMS calls ──────────────────
     // Our own accessToken above is what the frontend uses from now on for
@@ -355,23 +431,11 @@ const login = async (req, res) => {
         // Decode only — we don't hold UAT's signing secret, so we can't
         // (and don't need to) verify it here; PMS will do its own
         // verification when we forward it.
-        const decodedUat = jwt.decode(authToken);
-        const expiresAt = decodedUat?.exp
-          ? decodedUat.exp * 1000
-          : Date.now() + 24 * 60 * 60 * 1000; // fallback: 24h if token has no exp claim
-        setUatToken(empIdForLookup, authToken, expiresAt);
+        setUatToken(empIdForLookup, authToken, portalExpiry * 1000);
       } catch (e) {
         console.warn("⚠️ Could not cache UAT token for PMS use:", e.message);
       }
     }
-
-    // Set refresh token in HTTP-only cookie
-    res.cookie(process.env.COOKIE_NAME || "refreshToken", refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
 
     // console.log(
     //   "✅ Login successful for:",
@@ -387,7 +451,7 @@ const login = async (req, res) => {
       userid: loginResult.userid,
       // id: localUserId, // ❌ Removed - no users table dependency
       accessToken, // ✅ Quantify JWT — for Quantify's own APIs
-      portalAccessToken: authToken, // ✅ Main myahana portal token — for PMS API calls
+      accessTokenExpiresAt: jwt.decode(accessToken)?.exp || null,
       result: loginResult.result,
       source: loginResult.source,
       departments: departmentData,
@@ -516,114 +580,30 @@ const processUserLoginWithRBAC = (userRecord, rbacData, departmentData) => {
   };
 };
 
-// Helper: Process Pilot User Login
-const processPilotUserLogin = async (userRecord, res) => {
-  try {
-    const empId = userRecord.emp_id;
-    const userid = `${userRecord.u_id}_${empId}`;
-
-    const payload = {
-      emp_id: empId,
-      userid,
-    };
-
-    const accessToken = generateAccessToken(payload);
-    const refreshToken = generateRefreshToken(payload);
-
-    res.cookie(process.env.COOKIE_NAME, refreshToken, {
-      httpOnly: true,
-      secure: false,
-      sameSite: "none",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
-
-    const rbacData = userRecord.rbacDetails;
-
-    const rbacArray = Array.isArray(rbacData)
-      ? rbacData
-      : Array.isArray(rbacData?.associations)
-        ? rbacData.associations
-        : [];
-
-    const appName = process.env.RBAC_APPLICATION_NAME;
-
-    const pilotRoles = rbacArray.filter(
-      (role) => role.application_name === appName && role.is_active === true,
-    );
-
-    const [empRows] = await pool
-      .promise()
-      .query(`SELECT emp_id, emp_name FROM master.emp WHERE emp_id = ?`, [
-        empId,
-      ]);
-
-    if (empRows.length === 0) {
-      return res.status(401).json({
-        status: "failed",
-        message: "User not found",
-      });
-    }
-
-    const roleResults =
-      pilotRoles.length > 0
-        ? pilotRoles.map((role) => ({
-            ...empRows[0],
-            designation: role.role_name,
-            role_id: role.role_id,
-            association_id: role.association_id,
-          }))
-        : [
-            {
-              ...empRows[0],
-              designation: "User",
-            },
-          ];
-
-    return res.status(200).json({
-      status: "success",
-      userid,
-      accessToken,
-      isGroupHead: false,
-      result: roleResults,
-      rbacDetails: rbacData,
-      source: "master_emp",
-      message: "Token login successful",
-    });
-  } catch (error) {
-    console.error("❌ processPilotUserLogin Error:", error);
-
-    return res.status(500).json({
-      status: "failed",
-      message: error.message,
-    });
-  }
-};
-
-const refreshToken = (req, res) => {
-  try {
-    const token = req.cookies[process.env.COOKIE_NAME];
-
-    if (!token) {
-      return res.status(401).json({ message: "Not authenticated" });
-    }
-
-    const user = verifyRefreshToken(token);
-
-    const newAccessToken = generateAccessToken({
-      emp_id: user.emp_id,
-      userid: user.userid,
-    });
-
-    return res.json({ accessToken: newAccessToken });
-  } catch (err) {
-    return res.status(403).json({ message: "Invalid refresh token" });
-  }
-};
-
 const logout = (req, res) => {
-  res.clearCookie(process.env.COOKIE_NAME);
+  const authToken = req.headers.authorization?.replace(/^Bearer\s+/, "");
+  if (authToken) {
+    try {
+      const user = jwt.verify(
+        authToken,
+        process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || "dev_secret",
+        { ignoreExpiration: true },
+      );
+      if (user.emp_id) clearUatToken(user.emp_id);
+    } catch {
+      // Logout still clears the browser's legacy refresh cookie when the token is invalid.
+    }
+  }
+  const legacyCookieOptions = { path: "/" };
+  if (process.env.COOKIE_DOMAIN) {
+    legacyCookieOptions.domain = process.env.COOKIE_DOMAIN;
+  }
+  res.clearCookie(
+    process.env.COOKIE_NAME || "refreshToken",
+    legacyCookieOptions,
+  );
   infoLog("POST /api/auth/logout - success");
   return res.status(200).json({ message: "Logged out" });
 };
 
-module.exports = { login, refreshToken, logout };
+module.exports = { login, logout };
