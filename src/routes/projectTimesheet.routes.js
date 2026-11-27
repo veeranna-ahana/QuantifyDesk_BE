@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { syncHrmsTimesheets, getHrmsTimesheets,  getCategoryTimesheetsGroupedByEmployee, getAllCategoriesTimesheetsReport,  getAppDevDesignationTimesheetsReport,
-   getProjectWiseSummary, getResourceBreakdown 
+   getProjectWiseSummary, getResourceBreakdown, getEmployeeCategoryTimesheetDetails
  } = require('../controller/projectTimesheet.controller');
  const { authMiddleware } = require('../middleware/auth.middleware');
 
@@ -22,6 +22,11 @@ router.get(
 router.get(
   '/timesheets-app-dev-designation-report',
   getAppDevDesignationTimesheetsReport
+);
+
+router.get(
+  '/timesheets-app-dev-designation-employee-category/:employee_id/:project_category_code',
+  getEmployeeCategoryTimesheetDetails
 );
 
 router.get(
