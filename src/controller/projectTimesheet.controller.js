@@ -809,6 +809,288 @@ const getResourceBreakdown = async (req, res) => {
   }
 };
 
+const getEmployeeCategoryTimesheetDetails = async (req, res) => {
+  try {
+    const employeeId = String(
+      req.params.employee_id || req.query.employee_id || ''
+    ).trim();
+    const projectCategoryCode = String(
+      req.params.project_category_code || req.query.project_category_code || ''
+    ).trim();
+
+    if (!employeeId || !projectCategoryCode) {
+      return res.status(400).json({
+        success: false,
+        message: 'employee_id and project_category_code are required',
+      });
+    }
+
+    // ─── 1. Fetch HRMS employee & validate against Delivery/AppDev filter ──
+    const allEmployees = await fetchAllEmployeesFromHrms();
+
+    const hrmsEmployee = allEmployees.find(
+      (e) => String(e.Employee_ID || '').trim() === employeeId
+    );
+
+    if (!hrmsEmployee) {
+      return res.status(404).json({
+        success: false,
+        message: `Employee ${employeeId} not found in HRMS`,
+      });
+    }
+
+    const dept = String(hrmsEmployee.Name_of_Department || '').trim();
+    const status = String(hrmsEmployee.Employee_Status || '').trim().toLowerCase();
+    const designation = String(hrmsEmployee.Employee_Designation || '').toLowerCase();
+
+    const isEligible =
+      dept === 'Delivery' &&
+      status === 'active' &&
+      designation.includes('application development');
+
+    if (!isEligible) {
+      return res.status(400).json({
+        success: false,
+        message:
+          'Employee does not match the Delivery / Active / Application Development filter',
+      });
+    }
+
+    // ─── 1b. Employee-id → name map for approver resolution ──────────────
+    const employeeNameById = new Map();
+    for (const e of allEmployees) {
+      const id = String(e.Employee_ID || '').trim();
+      if (!id) continue;
+      employeeNameById.set(id, e.Employee_Name || null);
+    }
+
+    // ─── 2. Pull all raw timesheet rows for this employee + category ──────
+    const rows = await query(
+      `SELECT *
+         FROM hrms_timesheet
+        WHERE employee_id = ?
+          AND projectcategory_code = ?
+        ORDER BY project_code, from_date, to_date`,
+      [employeeId, projectCategoryCode]
+    );
+
+    const round2 = (n) => Math.round(n * 100) / 100;
+
+    // ─── 3. Format helpers (DB → DD/MM/YYYY, matching HRMS payload) ───────
+    const toDDMMYYYY = (val) => {
+      if (!val) return '';
+      // Accept Date object, ISO string, or already-formatted string
+      if (val instanceof Date && !isNaN(val)) {
+        const d = String(val.getDate()).padStart(2, '0');
+        const m = String(val.getMonth() + 1).padStart(2, '0');
+        const y = val.getFullYear();
+        return `${d}/${m}/${y}`;
+      }
+      const s = String(val).trim();
+      // If already DD/MM/YYYY, return as-is
+      if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) return s;
+      // ISO YYYY-MM-DD
+      const isoMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (isoMatch) return `${isoMatch[3]}/${isoMatch[2]}/${isoMatch[1]}`;
+      // YYYY-MM-DD HH:mm:ss style
+      const d = new Date(s);
+      if (!isNaN(d)) {
+        const dd = String(d.getDate()).padStart(2, '0');
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        return `${dd}/${mm}/${d.getFullYear()}`;
+      }
+      return s;
+    };
+
+    // ─── 4. Build raw entries in HRMS payload shape ───────────────────────
+    const rawEntries = rows.map((r) => ({
+      project_code: r.project_code || null,
+      project_name: r.project_name || null,
+      projectcategory_code: r.projectcategory_code || null,
+      projectcategory_name: r.projectcategory_name || null,
+      task_description: r.task_description || '',
+      duration: r.duration || '',
+      number_of_hours: r.number_of_hours != null ? String(r.number_of_hours) : '',
+      'From Date': toDDMMYYYY(r.from_date),
+      'To Date': toDDMMYYYY(r.to_date),
+      approval_status: r.approval_status || '',
+      // ✏️ Resolve approver id → name (falls back to raw id if unknown)
+      approved_by: r.approved_by
+        ? employeeNameById.get(String(r.approved_by).trim()) || r.approved_by
+        : null,
+      submitted_on: toDDMMYYYY(r.submitted_on),
+      approved_on: toDDMMYYYY(r.approved_on),
+      remarks: r.remarks || '',
+    }));
+
+    // ─── 5. Aggregate totals + per-project split ──────────────────────────
+    const totals = {
+      total_hours: 0,
+      approved_hours: 0,
+      pending_hours: 0,
+      rejected_hours: 0,
+      entries: 0,
+      approved: 0,
+      pending: 0,
+      rejected: 0,
+    };
+
+    const byProject = new Map();
+    let minFromDate = null;
+    let maxToDate = null;
+    let lastSubmittedOn = null;
+    let lastApprovedOn = null;
+    let lastApprovedBy = null;
+
+    for (const r of rows) {
+      const hours = Number(r.number_of_hours) || 0;
+      const st = String(r.approval_status || '').trim();
+
+      totals.total_hours += hours;
+      totals.entries += 1;
+
+      if (st === 'Approved') {
+        totals.approved += 1;
+        totals.approved_hours += hours;
+      } else if (st === 'Pending') {
+        totals.pending += 1;
+        totals.pending_hours += hours;
+      } else if (st === 'Rejected') {
+        totals.rejected += 1;
+        totals.rejected_hours += hours;
+      }
+
+      if (r.from_date && (!minFromDate || r.from_date < minFromDate)) {
+        minFromDate = r.from_date;
+      }
+      if (r.to_date && (!maxToDate || r.to_date > maxToDate)) {
+        maxToDate = r.to_date;
+      }
+      if (r.submitted_on && (!lastSubmittedOn || r.submitted_on > lastSubmittedOn)) {
+        lastSubmittedOn = r.submitted_on;
+      }
+      if (r.approved_on && (!lastApprovedOn || r.approved_on > lastApprovedOn)) {
+        lastApprovedOn = r.approved_on;
+        // ✏️ Resolve approver id → name (falls back to raw id if unknown)
+        lastApprovedBy = r.approved_by
+          ? employeeNameById.get(String(r.approved_by).trim()) || r.approved_by
+          : null;
+      }
+
+      // Per-project rollup
+      const key = r.project_code || 'NA';
+      if (!byProject.has(key)) {
+        byProject.set(key, {
+          project_code: r.project_code || null,
+          project_name: r.project_name || null,
+          total_hours: 0,
+          approved_hours: 0,
+          pending_hours: 0,
+          rejected_hours: 0,
+          entries: 0,
+          approved: 0,
+          pending: 0,
+          rejected: 0,
+        });
+      }
+      const p = byProject.get(key);
+      p.total_hours += hours;
+      p.entries += 1;
+      if (st === 'Approved') {
+        p.approved += 1;
+        p.approved_hours += hours;
+      } else if (st === 'Pending') {
+        p.pending += 1;
+        p.pending_hours += hours;
+      } else if (st === 'Rejected') {
+        p.rejected += 1;
+        p.rejected_hours += hours;
+      }
+    }
+
+    const projects = Array.from(byProject.values())
+      .map((p) => ({
+        ...p,
+        total_hours: round2(p.total_hours),
+        approved_hours: round2(p.approved_hours),
+        pending_hours: round2(p.pending_hours),
+        rejected_hours: round2(p.rejected_hours),
+      }))
+      .sort((a, b) => b.total_hours - a.total_hours);
+
+    totals.total_hours = round2(totals.total_hours);
+    totals.approved_hours = round2(totals.approved_hours);
+    totals.pending_hours = round2(totals.pending_hours);
+    totals.rejected_hours = round2(totals.rejected_hours);
+
+    const overallStatus =
+      totals.entries === 0
+        ? 'NoEntries'
+        : totals.pending > 0
+        ? 'Pending'
+        : totals.rejected > 0
+        ? 'Rejected'
+        : totals.approved === totals.entries
+        ? 'Approved'
+        : 'Mixed';
+
+    // ─── 6. Response ──────────────────────────────────────────────────────
+    return res.status(200).json({
+      success: true,
+      filter: {
+        employee_id: employeeId,
+        project_category_code: projectCategoryCode,
+        department: 'Delivery',
+        status: 'Active',
+        designation_contains: 'Application Development',
+      },
+      data: [
+        {
+          EmployeeInformation: {
+            employee_id: hrmsEmployee.Employee_ID || null,
+            employee_name: hrmsEmployee.Employee_Name || null,
+            designation: hrmsEmployee.Employee_Designation || null,
+            department: hrmsEmployee.Name_of_Department || null,
+            employee_email: hrmsEmployee.Employee_Official_Email_ID || null,
+            employee_phone: hrmsEmployee.Employee_Phone || null,
+            reporting_manager: hrmsEmployee.Reporting_Manager_Name || null,
+            employment_type: hrmsEmployee.Employment_Type || null,
+            doj: hrmsEmployee.DOJ || null,
+          },
+          ProjectDetails: rawEntries,
+          Summary: {
+            project_category_code: projectCategoryCode,
+            project_category_name:
+              rows.length > 0 ? rows[0].projectcategory_name || null : null,
+            total_hours: totals.total_hours,
+            approved_hours: totals.approved_hours,
+            pending_hours: totals.pending_hours,
+            rejected_hours: totals.rejected_hours,
+            entries: totals.entries,
+            approved: totals.approved,
+            pending: totals.pending,
+            rejected: totals.rejected,
+            from_date: toDDMMYYYY(minFromDate),
+            to_date: toDDMMYYYY(maxToDate),
+            last_submitted_on: toDDMMYYYY(lastSubmittedOn),
+            last_approved_on: toDDMMYYYY(lastApprovedOn),
+            last_approved_by: lastApprovedBy,
+            overall_status: overallStatus,
+            projects: projects, // per-project consolidated split
+          },
+        },
+      ],
+    });
+  } catch (err) {
+    console.error('❌ getEmployeeCategoryTimesheetDetails error:', err.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to load employee timesheet details for project category',
+      error: err.message,
+    });
+  }
+};
+
 
 module.exports = {
   syncHrmsTimesheets,
@@ -818,5 +1100,6 @@ module.exports = {
   getAllCategoriesTimesheetsReport,
    getAppDevDesignationTimesheetsReport,
     getProjectWiseSummary,
-    getResourceBreakdown 
+    getResourceBreakdown,
+    getEmployeeCategoryTimesheetDetails,
 };

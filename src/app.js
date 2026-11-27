@@ -23,6 +23,7 @@ const timesheetHrmsRoutes = require("./routes/projectTimesheet.routes");
 const quantifyDashboardRoutes = require("./routes/quantifyDashboard.routes");
 const memberDetailsRoutes = require("./routes/employees.routes");
 const skillAnalyticsRoutes = require("./routes/skills.routes");
+const timesheetHRMSRoutes = require("./routes/timesheetHRMS.routes"); // Import the timesheetHRMS routes
 
 const app = express();
 // Dummy Test API
@@ -73,6 +74,7 @@ app.use("/api/daily-reports", dailyReportsRoutes);
 app.use("/api/hrms", timesheetHrmsRoutes);
 app.use("/api/employees", memberDetailsRoutes);
 app.use("/api/skills", skillAnalyticsRoutes);
+app.use("/api/timesheet", timesheetHRMSRoutes); 
 // Global error handler
 app.use((err, req, res, next) => {
   console.error(err);
